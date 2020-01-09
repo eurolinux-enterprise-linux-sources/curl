@@ -1,0 +1,40 @@
+From 4274decb62daca78c9d43a025fc08f8d6fd3a341 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Sun, 14 Jul 2013 17:33:24 +0200
+Subject: [PATCH] curl_easy_perform: gradually increase the delay time
+
+Instead of going 50,100,150 etc millisecond delay time when nothing has
+been found to do or wait for, we now start lower and double each loop as
+in 4,8,16,32 etc.
+
+This lowers the minimum wait without sacrifizing the longer wait too
+much with unnecessary CPU cycles burnt.
+
+Bug: http://curl.haxx.se/mail/lib-2013-07/0103.html
+Reported-by: Andreas Malzahn
+
+[upstream commit d529f3882b9bca2c3eb32295dd6b2609d0c9b51f]
+
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/easy.c | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/lib/easy.c b/lib/easy.c
+index a7051dd..13801b2 100644
+--- a/lib/easy.c
++++ b/lib/easy.c
+@@ -465,9 +465,7 @@ CURLcode curl_easy_perform(CURL *easy)
+         if(curlx_tvdiff(after, before) <= 10) {
+           without_fds++;
+           if(without_fds > 2) {
+-            int sleep_ms = without_fds * 50;
+-            if(sleep_ms > 1000)
+-              sleep_ms = 1000;
++            int sleep_ms = without_fds < 10 ? (1 << (without_fds-1)): 1000;
+             Curl_wait_ms(sleep_ms);
+           }
+         }
+-- 
+1.9.3
+

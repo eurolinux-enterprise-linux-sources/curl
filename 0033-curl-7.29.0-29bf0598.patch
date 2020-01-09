@@ -1,0 +1,281 @@
+From f9ebe8047f5f62dfcee379b010d8207f0d6985b1 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Mon, 3 Jun 2013 20:19:51 +0200
+Subject: [PATCH 1/5] curl_multi_wait: reduce timeout if the multi handle wants
+ to
+
+If the multi handle's pending timeout is less than what is passed into
+this function, it will now opt to use the shorter time anyway since it
+is a very good hint that the handle wants to process something in a
+shorter time than what otherwise would happen.
+
+curl_multi_wait.3 was updated accordingly to clarify
+
+This is the reason for bug #1224
+
+Bug: http://curl.haxx.se/bug/view.cgi?id=1224
+Reported-by: Andrii Moiseiev
+
+Upstream-commit: 29bf0598aad58d9da5dd8c5358f5175dae49026d
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/libcurl/curl_multi_wait.3 | 3 +++
+ lib/multi.c                    | 9 +++++++++
+ 2 files changed, 12 insertions(+)
+
+diff --git a/docs/libcurl/curl_multi_wait.3 b/docs/libcurl/curl_multi_wait.3
+index b14760b..57c40f0 100644
+--- a/docs/libcurl/curl_multi_wait.3
++++ b/docs/libcurl/curl_multi_wait.3
+@@ -36,6 +36,9 @@ CURLMcode curl_multi_wait(CURLM *multi_handle,
+ This function polls on all file descriptors used by the curl easy handles
+ contained in the given multi handle set.  It will block until activity is
+ detected on at least one of the handles or \fItimeout_ms\fP has passed.
++Alternatively, if the multi handle has a pending internal timeout that has a
++shorter expiry time than \fItimeout_ms\fP, that shorter time will be used
++instead to make sure timeout accuracy is reasonably kept.
+ 
+ The calling application may pass additional curl_waitfd structures which are
+ similar to \fIpoll(2)\fP's pollfd structure to be waited on in the same call.
+diff --git a/lib/multi.c b/lib/multi.c
+index 9a8e68e..c8dd97d 100644
+--- a/lib/multi.c
++++ b/lib/multi.c
+@@ -81,6 +81,8 @@ static bool isHandleAtHead(struct SessionHandle *handle,
+ static CURLMcode add_next_timeout(struct timeval now,
+                                   struct Curl_multi *multi,
+                                   struct SessionHandle *d);
++static CURLMcode multi_timeout(struct Curl_multi *multi,
++                               long *timeout_ms);
+ 
+ #ifdef DEBUGBUILD
+ static const char * const statename[]={
+@@ -804,10 +806,17 @@ CURLMcode curl_multi_wait(CURLM *multi_handle,
+   unsigned int i;
+   unsigned int nfds = extra_nfds;
+   struct pollfd *ufds = NULL;
++  long timeout_internal;
+ 
+   if(!GOOD_MULTI_HANDLE(multi))
+     return CURLM_BAD_HANDLE;
+ 
++  /* If the internally desired timeout is actually shorter than requested from
++     the outside, then use the shorter time! */
++  (void)multi_timeout(multi, &timeout_internal);
++  if(timeout_internal < (long)timeout_ms)
++    timeout_ms = (int)timeout_internal;
++
+   /* Count up how many fds we have from the multi handle */
+   easy=multi->easy.next;
+   while(easy != &multi->easy) {
+-- 
+2.4.0
+
+
+From 3db7d3959815224b7a618860be783fed44fab72a Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Tue, 4 Jun 2013 13:22:40 +0200
+Subject: [PATCH 2/5] curl_multi_wait: only use internal timer if not -1
+
+commit 29bf0598aad5 introduced a problem when the "internal" timeout is
+prefered to the given if shorter, as it didn't consider the case where
+-1 was returned. Now the internal timeout is only considered if not -1.
+
+Reported-by: Tor Arntsen
+Bug: http://curl.haxx.se/mail/lib-2013-06/0015.html
+
+Upstream-commit: 0bf5ce77aabe7307e41db13a0d03a63517fdc366
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/multi.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/lib/multi.c b/lib/multi.c
+index c8dd97d..6dfce9b 100644
+--- a/lib/multi.c
++++ b/lib/multi.c
+@@ -812,9 +812,10 @@ CURLMcode curl_multi_wait(CURLM *multi_handle,
+     return CURLM_BAD_HANDLE;
+ 
+   /* If the internally desired timeout is actually shorter than requested from
+-     the outside, then use the shorter time! */
++     the outside, then use the shorter time! But only if the internal timer
++     is actually larger than 0! */
+   (void)multi_timeout(multi, &timeout_internal);
+-  if(timeout_internal < (long)timeout_ms)
++  if((timeout_internal > 0) && (timeout_internal < (long)timeout_ms))
+     timeout_ms = (int)timeout_internal;
+ 
+   /* Count up how many fds we have from the multi handle */
+-- 
+2.4.0
+
+
+From 761d88bb94e33a119f8e10083c33acf6fe216c79 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Tue, 20 Aug 2013 22:45:47 +0200
+Subject: [PATCH 3/5] FTP: fix getsock during DO_MORE state
+
+... when doing upload it would return the wrong values at times. This
+commit attempts to cleanup the mess.
+
+Bug: http://curl.haxx.se/mail/lib-2013-08/0109.html
+Reported-by: Mike Mio
+
+Upstream-commit: c4a7ca038e26a57df952b4ea560f9b718a5ebd1d
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/ftp.c | 24 ++++++++++--------------
+ 1 file changed, 10 insertions(+), 14 deletions(-)
+
+diff --git a/lib/ftp.c b/lib/ftp.c
+index 4501116..63d1e64 100644
+--- a/lib/ftp.c
++++ b/lib/ftp.c
+@@ -877,14 +877,9 @@ static int ftp_domore_getsock(struct connectdata *conn, curl_socket_t *socks,
+     return GETSOCK_BLANK;
+ 
+   /* When in DO_MORE state, we could be either waiting for us to connect to a
+-     remote site, or we could wait for that site to connect to us. Or just
+-     handle ordinary commands.
+-
+-     When waiting for a connect, we will be in FTP_STOP state and then we wait
+-     for the secondary socket to become writeable. If we're in another state,
+-     we're still handling commands on the control (primary) connection.
+-
+-  */
++   * remote site, or we could wait for that site to connect to us. Or just
++   * handle ordinary commands.
++   */
+ 
+   switch(ftpc->state) {
+   case FTP_STOP:
+@@ -893,13 +888,12 @@ static int ftp_domore_getsock(struct connectdata *conn, curl_socket_t *socks,
+     return Curl_pp_getsock(&conn->proto.ftpc.pp, socks, numsocks);
+   }
+ 
+-  socks[0] = conn->sock[SECONDARYSOCKET];
+-  if(ftpc->wait_data_conn) {
+-    socks[1] = conn->sock[FIRSTSOCKET];
+-    return GETSOCK_READSOCK(0) | GETSOCK_READSOCK(1);
+-  }
++  /* if stopped and still in this state, then we're also waiting for a
++     connect on the secondary connection */
++  socks[0] = conn->sock[FIRSTSOCKET];
++  socks[1] = conn->sock[SECONDARYSOCKET];
+ 
+-  return GETSOCK_READSOCK(0);
++  return GETSOCK_READSOCK(FIRSTSOCKET) | GETSOCK_WRITESOCK(SECONDARYSOCKET);
+ }
+ 
+ /* This is called after the FTP_QUOTE state is passed.
+@@ -2421,6 +2415,8 @@ static CURLcode ftp_state_stor_resp(struct connectdata *conn,
+   if(data->set.ftp_use_port) {
+     bool connected;
+ 
++    state(conn, FTP_STOP); /* no longer in STOR state */
++
+     result = AllowServerConnect(conn, &connected);
+     if(result)
+       return result;
+-- 
+2.4.0
+
+
+From 5b18b86746cf09208e57adb69edcf411b10f5e30 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Sat, 6 Apr 2013 17:49:58 +0200
+Subject: [PATCH 4/5] ftp tests: libcurl returns CURLE_FTP_ACCEPT_FAILED better
+ now
+
+Since commit 57aeabcc1a20f, it handles errors on the control connection
+while waiting for the data connection better.
+
+Test 591 and 592 are updated accordingly.
+
+Upstream-commit: 18f0ab7bd353289049ca06c4a7105473e37a8f20
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ tests/data/test591 | 4 ++--
+ tests/data/test592 | 5 +++--
+ 2 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/tests/data/test591 b/tests/data/test591
+index 42a2271..1455a38 100644
+--- a/tests/data/test591
++++ b/tests/data/test591
+@@ -63,9 +63,9 @@ TYPE I
+ STOR 591
+ QUIT
+ </protocol>
+-# CURLE_UPLOAD_FAILED = 25
++# CURLE_FTP_ACCEPT_FAILED = 10
+ <errorcode>
+-25
++10
+ </errorcode>
+ <upload>
+ </upload>
+diff --git a/tests/data/test592 b/tests/data/test592
+index 23aa6c4..f443205 100644
+--- a/tests/data/test592
++++ b/tests/data/test592
+@@ -62,10 +62,11 @@ EPRT |1|
+ PORT
+ TYPE I
+ STOR 592
++QUIT
+ </protocol>
+-# 28 == CURLE_OPERATION_TIMEDOUT
++# CURLE_FTP_ACCEPT_FAILED = 10
+ <errorcode>
+-28
++10
+ </errorcode>
+ <upload>
+ </upload>
+-- 
+2.4.0
+
+
+From 599ef7d7ec8ed7a979df1cd3180819359e6af97f Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Thu, 6 Jun 2013 22:20:39 +0200
+Subject: [PATCH 5/5] lib1500: remove bad check
+
+After curl_multi_wait() returns, this test checked that we got exactly
+one file descriptor told to read from, but we cannot be sure that is
+true. curl_multi_wait() will sometimes return earlier without any file
+descriptor to handle, just just because it is a suitable time to call
+*perform().
+
+This problem showed up with commit 29bf0598.
+
+Bug: http://curl.haxx.se/mail/lib-2013-06/0029.html
+Reported-by: Fabian Keil
+
+Upstream-commit: 87cf677eca55abee88f0a9dced9e6fa570143873
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ tests/libtest/lib1500.c | 5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/tests/libtest/lib1500.c b/tests/libtest/lib1500.c
+index 784bdb2..736a817 100644
+--- a/tests/libtest/lib1500.c
++++ b/tests/libtest/lib1500.c
+@@ -61,11 +61,6 @@ int test(char *URL)
+       res = -1;
+       goto test_cleanup;
+     }
+-    if (num != 1) {
+-      printf("curl_multi_wait() returned on %d handle(s), expected 1\n", num);
+-      res = -1;
+-      goto test_cleanup;
+-    }
+ 
+     abort_on_test_timeout();
+ 
+-- 
+2.4.0
+

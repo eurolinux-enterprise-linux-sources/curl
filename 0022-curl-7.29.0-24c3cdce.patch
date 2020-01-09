@@ -1,0 +1,237 @@
+From ca7b1cd659eb0eb0ef355e3e122742abcea73287 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Wed, 2 Jul 2014 16:34:48 +0200
+Subject: [PATCH 1/3] tool: call PR_Cleanup() on exit if NSPR is used
+
+This prevents valgrind from reporting possibly lost memory that NSPR
+uses for file descriptor cache and other globally allocated internal
+data structures.
+
+Upstream-commit: 24c3cdce88f39731506c287cb276e8bf4a1ce393
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ src/tool_main.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/tool_main.c b/src/tool_main.c
+index 95e9cc7..6a1ed6c 100644
+--- a/src/tool_main.c
++++ b/src/tool_main.c
+@@ -27,6 +27,10 @@
+ #include <signal.h>
+ #endif
+ 
++#ifdef USE_NSS
++#include <nspr.h>
++#endif
++
+ #define ENABLE_CURLX_PRINTF
+ /* use our own printf() functions */
+ #include "curlx.h"
+@@ -104,6 +108,12 @@ int main(int argc, char *argv[])
+     tool_pressanykey();
+ #endif
+ 
++#ifdef USE_NSS
++  if(PR_Initialized())
++    /* prevent valgrind from reporting possibly lost memory (fd cache, ...) */
++    PR_Cleanup();
++#endif
++
+   free_config_fields(&config);
+ 
+ #ifdef __NOVELL_LIBC__
+-- 
+2.1.0
+
+
+From 295471f8122cf6522c36f8e3588e5b4d15a691ea Mon Sep 17 00:00:00 2001
+From: Alessandro Ghedini <alessandro@ghedini.me>
+Date: Thu, 17 Jul 2014 14:37:28 +0200
+Subject: [PATCH 2/3] build: link curl to NSS libraries when NSS support is
+ enabled
+
+This fixes a build failure on Debian caused by commit
+24c3cdce88f39731506c287cb276e8bf4a1ce393.
+
+Bug: http://curl.haxx.se/mail/lib-2014-07/0209.html
+
+Upstream-commit: c6e7cbb94e669b85d3eb8e015ec51d0072112133
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ configure       | 5 ++++-
+ configure.ac    | 4 ++++
+ src/Makefile.am | 2 +-
+ src/Makefile.in | 3 ++-
+ 4 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/configure b/configure
+index 8741e21..c5d1817 100755
+--- a/configure
++++ b/configure
+@@ -913,7 +913,7 @@ LIBMETALINK_LIBS
+ CURL_CA_BUNDLE
+ SSL_ENABLED
+ USE_AXTLS
+-HAVE_NSS_INITCONTEXT
++NSS_LIBS
+ USE_NSS
+ USE_CYASSL
+ USE_POLARSSL
+@@ -23697,6 +23697,9 @@ fi
+         { $as_echo "$as_me:${as_lineno-$LINENO}: detected NSS version $version" >&5
+ $as_echo "$as_me: detected NSS version $version" >&6;}
+ 
++                NSS_LIBS=$addlib
++
++
+                                         if test "x$cross_compiling" != "xyes"; then
+           LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$nssprefix/lib$libsuff"
+           export LD_LIBRARY_PATH
+diff --git a/configure.ac b/configure.ac
+index 70ef0b7..60a6b58 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -2211,6 +2211,10 @@ if test "$curl_ssl_msg" = "$init_ssl_msg"; then
+       if test "x$USE_NSS" = "xyes"; then
+         AC_MSG_NOTICE([detected NSS version $version])
+ 
++        dnl needed when linking the curl tool without USE_EXPLICIT_LIB_DEPS
++        NSS_LIBS=$addlib
++        AC_SUBST([NSS_LIBS])
++
+         dnl when shared libs were found in a path that the run-time
+         dnl linker doesn't search through, we need to add it to
+         dnl LD_LIBRARY_PATH to prevent further configure tests to fail
+diff --git a/src/Makefile.am b/src/Makefile.am
+index af5a488..6863078 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -60,7 +60,7 @@ LIBS = $(BLANK_AT_MAKETIME)
+ if USE_EXPLICIT_LIB_DEPS
+ curl_LDADD = $(top_builddir)/lib/libcurl.la @LIBMETALINK_LIBS@ @LIBCURL_LIBS@
+ else
+-curl_LDADD = $(top_builddir)/lib/libcurl.la @LIBMETALINK_LIBS@ @ZLIB_LIBS@ @CURL_NETWORK_AND_TIME_LIBS@
++curl_LDADD = $(top_builddir)/lib/libcurl.la @LIBMETALINK_LIBS@ @NSS_LIBS@ @ZLIB_LIBS@ @CURL_NETWORK_AND_TIME_LIBS@
+ endif
+ 
+ curl_LDFLAGS = @LIBMETALINK_LDFLAGS@
+diff --git a/src/Makefile.in b/src/Makefile.in
+index 41fb549..1b578c2 100644
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -231,6 +231,7 @@ NMEDIT = @NMEDIT@
+ # Use the C locale to ensure that only ASCII characters appear in the
+ # embedded text.
+ NROFF = env LC_ALL=C @NROFF@ @MANOPT@ # figured out by the configure script
++NSS_LIBS = @NSS_LIBS@
+ OBJDUMP = @OBJDUMP@
+ OBJEXT = @OBJEXT@
+ OTOOL = @OTOOL@
+@@ -463,7 +464,7 @@ CURL_HFILES = \
+ 	tool_xattr.h
+ 
+ curl_SOURCES = $(CURL_CFILES) $(CURLX_ONES) $(CURL_HFILES)
+-@USE_EXPLICIT_LIB_DEPS_FALSE@curl_LDADD = $(top_builddir)/lib/libcurl.la @LIBMETALINK_LIBS@ @ZLIB_LIBS@ @CURL_NETWORK_AND_TIME_LIBS@
++@USE_EXPLICIT_LIB_DEPS_FALSE@curl_LDADD = $(top_builddir)/lib/libcurl.la @LIBMETALINK_LIBS@ @NSS_LIBS@ @ZLIB_LIBS@ @CURL_NETWORK_AND_TIME_LIBS@
+ @USE_EXPLICIT_LIB_DEPS_TRUE@curl_LDADD = $(top_builddir)/lib/libcurl.la @LIBMETALINK_LIBS@ @LIBCURL_LIBS@
+ curl_LDFLAGS = @LIBMETALINK_LDFLAGS@
+ curl_CPPFLAGS = $(AM_CPPFLAGS) $(LIBMETALINK_CPPFLAGS)
+-- 
+2.1.0
+
+
+From 0631da3859c9868ff317521544a246b5be83e600 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Tue, 14 Jul 2015 17:08:44 +0200
+Subject: [PATCH 3/3] libtest: call PR_Cleanup() on exit if NSPR is used
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This prevents valgrind from reporting possibly lost memory that NSPR
+uses for file descriptor cache and other globally allocated internal
+data structures.
+
+Reported-by: Štefan Kremeň
+
+Upstream-commit: cd20e81e89ecebc5064e1d3e22e62e2802b2711e
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ tests/libtest/Makefile.am |  4 ++--
+ tests/libtest/Makefile.in |  4 ++--
+ tests/libtest/first.c     | 15 ++++++++++++++-
+ 3 files changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/tests/libtest/Makefile.am b/tests/libtest/Makefile.am
+index ba4097f..a844ab2 100644
+--- a/tests/libtest/Makefile.am
++++ b/tests/libtest/Makefile.am
+@@ -62,8 +62,8 @@ if USE_EXPLICIT_LIB_DEPS
+ SUPPORTFILES_LIBS = $(top_builddir)/lib/libcurl.la @LIBCURL_LIBS@
+ TESTUTIL_LIBS = $(top_builddir)/lib/libcurl.la @LIBCURL_LIBS@
+ else
+-SUPPORTFILES_LIBS = $(top_builddir)/lib/libcurl.la @CURL_NETWORK_LIBS@
+-TESTUTIL_LIBS = $(top_builddir)/lib/libcurl.la @CURL_NETWORK_AND_TIME_LIBS@
++SUPPORTFILES_LIBS = $(top_builddir)/lib/libcurl.la @CURL_NETWORK_LIBS@ @NSS_LIBS@
++TESTUTIL_LIBS = $(top_builddir)/lib/libcurl.la @CURL_NETWORK_AND_TIME_LIBS@ @NSS_LIBS@
+ endif
+ 
+ # Dependencies (may need to be overriden)
+diff --git a/tests/libtest/Makefile.in b/tests/libtest/Makefile.in
+index e6826c0..9086af3 100644
+--- a/tests/libtest/Makefile.in
++++ b/tests/libtest/Makefile.in
+@@ -949,9 +949,9 @@ AUTOMAKE_OPTIONS = foreign nostdinc
+ EXTRA_DIST = test75.pl test307.pl test610.pl test613.pl test1013.pl	\
+ test1022.pl Makefile.inc notexists.pl
+ 
+-@USE_EXPLICIT_LIB_DEPS_FALSE@SUPPORTFILES_LIBS = $(top_builddir)/lib/libcurl.la @CURL_NETWORK_LIBS@
++@USE_EXPLICIT_LIB_DEPS_FALSE@SUPPORTFILES_LIBS = $(top_builddir)/lib/libcurl.la @CURL_NETWORK_LIBS@ @NSS_LIBS@
+ @USE_EXPLICIT_LIB_DEPS_TRUE@SUPPORTFILES_LIBS = $(top_builddir)/lib/libcurl.la @LIBCURL_LIBS@
+-@USE_EXPLICIT_LIB_DEPS_FALSE@TESTUTIL_LIBS = $(top_builddir)/lib/libcurl.la @CURL_NETWORK_AND_TIME_LIBS@
++@USE_EXPLICIT_LIB_DEPS_FALSE@TESTUTIL_LIBS = $(top_builddir)/lib/libcurl.la @CURL_NETWORK_AND_TIME_LIBS@ @NSS_LIBS@
+ @USE_EXPLICIT_LIB_DEPS_TRUE@TESTUTIL_LIBS = $(top_builddir)/lib/libcurl.la @LIBCURL_LIBS@
+ 
+ # Dependencies (may need to be overriden)
+diff --git a/tests/libtest/first.c b/tests/libtest/first.c
+index 253acb2..94748a5 100644
+--- a/tests/libtest/first.c
++++ b/tests/libtest/first.c
+@@ -25,6 +25,10 @@
+ #include <locale.h> /* for setlocale() */
+ #endif
+ 
++#ifdef USE_NSS
++#include <nspr.h>
++#endif
++
+ #ifdef CURLDEBUG
+ #  define MEMDEBUG_NODEFINES
+ #  include "memdebug.h"
+@@ -97,6 +101,7 @@ static void memory_tracking_init(void)
+ int main(int argc, char **argv)
+ {
+   char *URL;
++  int result;
+ 
+   memory_tracking_init();
+ 
+@@ -127,5 +132,13 @@ int main(int argc, char **argv)
+ 
+   fprintf(stderr, "URL: %s\n", URL);
+ 
+-  return test(URL);
++  result = test(URL);
++
++#ifdef USE_NSS
++  if(PR_Initialized())
++    /* prevent valgrind from reporting possibly lost memory (fd cache, ...) */
++    PR_Cleanup();
++#endif
++
++  return result;
+ }
+-- 
+2.4.3
+

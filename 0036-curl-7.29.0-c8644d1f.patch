@@ -1,0 +1,2007 @@
+From 3fef242a1e1a74140a1678d84164086d0f47d83a Mon Sep 17 00:00:00 2001
+From: Peter Wu <peter@lekensteyn.nl>
+Date: Thu, 27 Nov 2014 23:59:19 +0100
+Subject: [PATCH 01/11] sws: move away from IPv4/IPv4-only assumption
+
+Instead of depending the socket domain type on use_ipv6, specify the
+domain type (AF_INET / AF_INET6) as variable. An enum is used here with
+switch to avoid compiler warnings in connect_to, complaining that rc
+is possibly undefined (which is not possible as socket_domain is
+always set).
+
+Besides abstracting the socket type, make the debugging messages be
+independent on IP (introduce location_str which points to "port XXXXX").
+Rename "ipv_inuse" to "socket_type" and tighten the scope (main).
+
+Signed-off-by: Peter Wu <peter@lekensteyn.nl>
+
+Upstream-commit: cf6c5c222d86088cbfc9dee4c23f8ada96ee91e7
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ tests/server/sws.c | 88 ++++++++++++++++++++++++------------------------------
+ 1 file changed, 39 insertions(+), 49 deletions(-)
+
+diff --git a/tests/server/sws.c b/tests/server/sws.c
+index aef55ea..fa10d54 100644
+--- a/tests/server/sws.c
++++ b/tests/server/sws.c
+@@ -65,11 +65,13 @@
+ #define ERANGE  34 /* errno.h value */
+ #endif
+ 
++static enum {
++  socket_domain_inet = AF_INET,
+ #ifdef ENABLE_IPV6
+-static bool use_ipv6 = FALSE;
++  socket_domain_inet6 = AF_INET6
+ #endif
++} socket_domain = AF_INET;
+ static bool use_gopher = FALSE;
+-static const char *ipv_inuse = "IPv4";
+ static int serverlogslocked = 0;
+ static bool is_proxy = FALSE;
+ 
+@@ -1285,7 +1287,7 @@ static curl_socket_t connect_to(const char *ipaddr, unsigned short port)
+ #endif
+ 
+ #ifdef ENABLE_IPV6
+-  if(use_ipv6) {
++  if(socket_domain == AF_INET6) {
+     op_br = "[";
+     cl_br = "]";
+   }
+@@ -1297,14 +1299,8 @@ static curl_socket_t connect_to(const char *ipaddr, unsigned short port)
+   logmsg("about to connect to %s%s%s:%hu",
+          op_br, ipaddr, cl_br, port);
+ 
+-#ifdef ENABLE_IPV6
+-  if(!use_ipv6)
+-#endif
+-    serverfd = socket(AF_INET, SOCK_STREAM, 0);
+-#ifdef ENABLE_IPV6
+-  else
+-    serverfd = socket(AF_INET6, SOCK_STREAM, 0);
+-#endif
++
++  serverfd = socket(socket_domain, SOCK_STREAM, 0);
+   if(CURL_SOCKET_BAD == serverfd) {
+     error = SOCKERRNO;
+     logmsg("Error creating socket for server conection: (%d) %s",
+@@ -1322,9 +1318,8 @@ static curl_socket_t connect_to(const char *ipaddr, unsigned short port)
+     logmsg("TCP_NODELAY set for server conection");
+ #endif
+ 
+-#ifdef ENABLE_IPV6
+-  if(!use_ipv6) {
+-#endif
++  switch(socket_domain) {
++  case AF_INET:
+     memset(&serveraddr.sa4, 0, sizeof(serveraddr.sa4));
+     serveraddr.sa4.sin_family = AF_INET;
+     serveraddr.sa4.sin_port = htons(port);
+@@ -1335,9 +1330,9 @@ static curl_socket_t connect_to(const char *ipaddr, unsigned short port)
+     }
+ 
+     rc = connect(serverfd, &serveraddr.sa, sizeof(serveraddr.sa4));
++    break;
+ #ifdef ENABLE_IPV6
+-  }
+-  else {
++  case AF_INET6:
+     memset(&serveraddr.sa6, 0, sizeof(serveraddr.sa6));
+     serveraddr.sa6.sin6_family = AF_INET6;
+     serveraddr.sa6.sin6_port = htons(port);
+@@ -1348,8 +1343,9 @@ static curl_socket_t connect_to(const char *ipaddr, unsigned short port)
+     }
+ 
+     rc = connect(serverfd, &serveraddr.sa, sizeof(serveraddr.sa6));
+-  }
++    break;
+ #endif /* ENABLE_IPV6 */
++  }
+ 
+   if(got_exit_signal) {
+     sclose(serverfd);
+@@ -1924,21 +1920,20 @@ int main(int argc, char *argv[])
+   int arg=1;
+   long pid;
+   const char *hostport = "127.0.0.1";
++  const char *socket_type = "IPv4";
++  char port_str[11];
++  const char *location_str = port_str;
+   size_t socket_idx;
+ 
+   memset(&req, 0, sizeof(req));
+ 
+   while(argc>arg) {
+     if(!strcmp("--version", argv[arg])) {
+-      printf("sws IPv4%s"
+-             "\n"
+-             ,
++      puts("sws IPv4"
+ #ifdef ENABLE_IPV6
+              "/IPv6"
+-#else
+-             ""
+ #endif
+-             );
++          );
+       return 0;
+     }
+     else if(!strcmp("--pidfile", argv[arg])) {
+@@ -1957,16 +1952,16 @@ int main(int argc, char *argv[])
+       end_of_headers = "\r\n"; /* gopher style is much simpler */
+     }
+     else if(!strcmp("--ipv4", argv[arg])) {
+-#ifdef ENABLE_IPV6
+-      ipv_inuse = "IPv4";
+-      use_ipv6 = FALSE;
+-#endif
++      socket_type = "IPv4";
++      socket_domain = AF_INET;
++      location_str = port_str;
+       arg++;
+     }
+     else if(!strcmp("--ipv6", argv[arg])) {
+ #ifdef ENABLE_IPV6
+-      ipv_inuse = "IPv6";
+-      use_ipv6 = TRUE;
++      socket_type = "IPv6";
++      socket_domain = AF_INET6;
++      location_str = port_str;
+ #endif
+       arg++;
+     }
+@@ -2018,6 +2013,8 @@ int main(int argc, char *argv[])
+     }
+   }
+ 
++  snprintf(port_str, sizeof(port_str), "port %hu", port);
++
+ #ifdef WIN32
+   win32_init();
+   atexit(win32_cleanup);
+@@ -2027,14 +2024,7 @@ int main(int argc, char *argv[])
+ 
+   pid = (long)getpid();
+ 
+-#ifdef ENABLE_IPV6
+-  if(!use_ipv6)
+-#endif
+-    sock = socket(AF_INET, SOCK_STREAM, 0);
+-#ifdef ENABLE_IPV6
+-  else
+-    sock = socket(AF_INET6, SOCK_STREAM, 0);
+-#endif
++  sock = socket(socket_domain, SOCK_STREAM, 0);
+ 
+   all_sockets[0] = sock;
+   num_sockets = 1;
+@@ -2061,33 +2051,33 @@ int main(int argc, char *argv[])
+     goto sws_cleanup;
+   }
+ 
+-#ifdef ENABLE_IPV6
+-  if(!use_ipv6) {
+-#endif
++  switch(socket_domain) {
++  case AF_INET:
+     memset(&me.sa4, 0, sizeof(me.sa4));
+     me.sa4.sin_family = AF_INET;
+     me.sa4.sin_addr.s_addr = INADDR_ANY;
+     me.sa4.sin_port = htons(port);
+     rc = bind(sock, &me.sa, sizeof(me.sa4));
++    break;
+ #ifdef ENABLE_IPV6
+-  }
+-  else {
++  case AF_INET6:
+     memset(&me.sa6, 0, sizeof(me.sa6));
+     me.sa6.sin6_family = AF_INET6;
+     me.sa6.sin6_addr = in6addr_any;
+     me.sa6.sin6_port = htons(port);
+     rc = bind(sock, &me.sa, sizeof(me.sa6));
+-  }
++    break;
+ #endif /* ENABLE_IPV6 */
++  }
+   if(0 != rc) {
+     error = SOCKERRNO;
+-    logmsg("Error binding socket on port %hu: (%d) %s",
+-           port, error, strerror(error));
++    logmsg("Error binding socket on %s: (%d) %s",
++           location_str, error, strerror(error));
+     goto sws_cleanup;
+   }
+ 
+-  logmsg("Running %s %s version on port %d",
+-         use_gopher?"GOPHER":"HTTP", ipv_inuse, (int)port);
++  logmsg("Running %s %s version on %s",
++         use_gopher?"GOPHER":"HTTP", socket_type, location_str);
+ 
+   /* start accepting connections */
+   rc = listen(sock, 5);
+@@ -2251,8 +2241,8 @@ sws_cleanup:
+   restore_signal_handlers();
+ 
+   if(got_exit_signal) {
+-    logmsg("========> %s sws (port: %d pid: %ld) exits with signal (%d)",
+-           ipv_inuse, (int)port, pid, exit_signal);
++    logmsg("========> %s sws (%s pid: %ld) exits with signal (%d)",
++           socket_type, location_str, pid, exit_signal);
+     /*
+      * To properly set the return status of the process we
+      * must raise the same signal SIGINT or SIGTERM that we
+-- 
+2.5.2
+
+
+From d8d875f7c528157feec0795c03bd065420903f5d Mon Sep 17 00:00:00 2001
+From: Steve Holme <steve_holme@hotmail.com>
+Date: Wed, 3 Dec 2014 00:00:40 +0000
+Subject: [PATCH 02/11] sws.c: Fixed compilation warning when IPv6 is disabled
+
+sws.c:69: warning: comma at end of enumerator list
+
+Upstream-commit: d784000a1468efc986c7d156d2e7c84d1920af87
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ tests/server/sws.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/tests/server/sws.c b/tests/server/sws.c
+index fa10d54..2b7e628 100644
+--- a/tests/server/sws.c
++++ b/tests/server/sws.c
+@@ -66,9 +66,9 @@
+ #endif
+ 
+ static enum {
+-  socket_domain_inet = AF_INET,
++  socket_domain_inet = AF_INET
+ #ifdef ENABLE_IPV6
+-  socket_domain_inet6 = AF_INET6
++  , socket_domain_inet6 = AF_INET6
+ #endif
+ } socket_domain = AF_INET;
+ static bool use_gopher = FALSE;
+-- 
+2.5.2
+
+
+From db2095dec37630309bacca6795cd4cfcf6557c9b Mon Sep 17 00:00:00 2001
+From: Peter Wu <peter@lekensteyn.nl>
+Date: Thu, 27 Nov 2014 23:59:20 +0100
+Subject: [PATCH 03/11] sws: restrict TCP_NODELAY to IP sockets
+
+TCP_NODELAY does not make sense for Unix sockets, so enable it only if
+the socket is using IP.
+
+Signed-off-by: Peter Wu <peter@lekensteyn.nl>
+
+Upstream-commit: fb7d7e0022f22035449bbc506068004f0568f8ae
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ tests/server/sws.c | 73 ++++++++++++++++++++++++++++++++----------------------
+ 1 file changed, 44 insertions(+), 29 deletions(-)
+
+diff --git a/tests/server/sws.c b/tests/server/sws.c
+index 2b7e628..0739a70 100644
+--- a/tests/server/sws.c
++++ b/tests/server/sws.c
+@@ -331,6 +331,21 @@ static void restore_signal_handlers(void)
+ #endif
+ }
+ 
++/* returns true if the current socket is an IP one */
++static bool socket_domain_is_ip(void)
++{
++  switch(socket_domain) {
++  case AF_INET:
++#ifdef ENABLE_IPV6
++  case AF_INET6:
++#endif
++    return true;
++  default:
++  /* case AF_UNIX: */
++    return false;
++  }
++}
++
+ /* based on the testno, parse the correct server commands */
+ static int parse_servercmd(struct httprequest *req)
+ {
+@@ -1282,9 +1297,6 @@ static curl_socket_t connect_to(const char *ipaddr, unsigned short port)
+   int rc;
+   const char *op_br = "";
+   const char *cl_br = "";
+-#ifdef TCP_NODELAY
+-  curl_socklen_t flag;
+-#endif
+ 
+ #ifdef ENABLE_IPV6
+   if(socket_domain == AF_INET6) {
+@@ -1309,13 +1321,15 @@ static curl_socket_t connect_to(const char *ipaddr, unsigned short port)
+   }
+ 
+ #ifdef TCP_NODELAY
+-  /* Disable the Nagle algorithm */
+-  flag = 1;
+-  if(0 != setsockopt(serverfd, IPPROTO_TCP, TCP_NODELAY,
+-                     (void *)&flag, sizeof(flag)))
+-    logmsg("====> TCP_NODELAY for server conection failed");
+-  else
+-    logmsg("TCP_NODELAY set for server conection");
++  if(socket_domain_is_ip()) {
++    /* Disable the Nagle algorithm */
++    curl_socklen_t flag = 1;
++    if(0 != setsockopt(serverfd, IPPROTO_TCP, TCP_NODELAY,
++                       (void *)&flag, sizeof(flag)))
++      logmsg("====> TCP_NODELAY for server conection failed");
++    else
++      logmsg("TCP_NODELAY set for server conection");
++  }
+ #endif
+ 
+   switch(socket_domain) {
+@@ -1398,9 +1412,6 @@ static void http_connect(curl_socket_t *infdp,
+   bool poll_server_rd[2] = { TRUE, TRUE };
+   bool poll_client_wr[2] = { TRUE, TRUE };
+   bool poll_server_wr[2] = { TRUE, TRUE };
+-#ifdef TCP_NODELAY
+-  curl_socklen_t flag;
+-#endif
+   bool primary = FALSE;
+   bool secondary = FALSE;
+   int max_tunnel_idx; /* CTRL or DATA */
+@@ -1514,13 +1525,15 @@ static void http_connect(curl_socket_t *infdp,
+           memset(&req2, 0, sizeof(req2));
+           logmsg("====> Client connect DATA");
+ #ifdef TCP_NODELAY
+-          /* Disable the Nagle algorithm */
+-          flag = 1;
+-          if(0 != setsockopt(datafd, IPPROTO_TCP, TCP_NODELAY,
+-                             (void *)&flag, sizeof(flag)))
+-            logmsg("====> TCP_NODELAY for client DATA conection failed");
+-          else
+-            logmsg("TCP_NODELAY set for client DATA conection");
++          if(socket_domain_is_ip()) {
++            /* Disable the Nagle algorithm */
++            curl_socklen_t flag = 1;
++            if(0 != setsockopt(datafd, IPPROTO_TCP, TCP_NODELAY,
++                               (void *)&flag, sizeof(flag)))
++              logmsg("====> TCP_NODELAY for client DATA conection failed");
++            else
++              logmsg("TCP_NODELAY set for client DATA conection");
++          }
+ #endif
+           req2.pipelining = FALSE;
+           init_httprequest(&req2);
+@@ -1826,15 +1839,17 @@ static curl_socket_t accept_connection(curl_socket_t sock)
+   num_sockets += 1;
+ 
+ #ifdef TCP_NODELAY
+-  /*
+-   * Disable the Nagle algorithm to make it easier to send out a large
+-   * response in many small segments to torture the clients more.
+-   */
+-  if(0 != setsockopt(msgsock, IPPROTO_TCP, TCP_NODELAY,
+-                     (void *)&flag, sizeof(flag)))
+-    logmsg("====> TCP_NODELAY failed");
+-  else
+-    logmsg("TCP_NODELAY set");
++  if(socket_domain_is_ip()) {
++    /*
++     * Disable the Nagle algorithm to make it easier to send out a large
++     * response in many small segments to torture the clients more.
++     */
++    if(0 != setsockopt(msgsock, IPPROTO_TCP, TCP_NODELAY,
++                       (void *)&flag, sizeof(flag)))
++      logmsg("====> TCP_NODELAY failed");
++    else
++      logmsg("TCP_NODELAY set");
++  }
+ #endif
+ 
+   return msgsock;
+-- 
+2.5.2
+
+
+From 7ab987459a931e593dc9f533d6e6cb6e9a26d424 Mon Sep 17 00:00:00 2001
+From: Peter Wu <peter@lekensteyn.nl>
+Date: Wed, 3 Dec 2014 02:20:00 +0100
+Subject: [PATCH 04/11] sws: add UNIX domain socket support
+
+This extends sws with a --unix-socket option which causes the port to
+be ignored (as the server now listens on the path specified by
+--unix-socket). This feature will be available in the following patch
+that enables checking for UNIX domain socket support.
+
+Proxy support (CONNECT) is not considered nor tested. It does not make
+sense anyway, first connecting through a TCP proxy, then let that TCP
+proxy connect to a UNIX socket.
+
+Signed-off-by: Peter Wu <peter@lekensteyn.nl>
+
+Upstream-commit: e9c7a86220ddf4e67b8bff56cddfc7388afcc9ef
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ tests/server/server_sockaddr.h |  9 ++++++-
+ tests/server/sws.c             | 53 ++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 61 insertions(+), 1 deletion(-)
+
+diff --git a/tests/server/server_sockaddr.h b/tests/server/server_sockaddr.h
+index 6a17fe0..3f4cd67 100644
+--- a/tests/server/server_sockaddr.h
++++ b/tests/server/server_sockaddr.h
+@@ -7,7 +7,7 @@
+  *                            | (__| |_| |  _ <| |___
+  *                             \___|\___/|_| \_\_____|
+  *
+- * Copyright (C) 1998 - 2012, Daniel Stenberg, <daniel@haxx.se>, et al.
++ * Copyright (C) 1998 - 2014, Daniel Stenberg, <daniel@haxx.se>, et al.
+  *
+  * This software is licensed as described in the file COPYING, which
+  * you should have received as part of this distribution. The terms
+@@ -23,12 +23,19 @@
+  ***************************************************************************/
+ #include "server_setup.h"
+ 
++#ifdef HAVE_SYS_UN_H
++#include <sys/un.h> /* for sockaddr_un */
++#endif
++
+ typedef union {
+   struct sockaddr      sa;
+   struct sockaddr_in   sa4;
+ #ifdef ENABLE_IPV6
+   struct sockaddr_in6  sa6;
+ #endif
++#ifdef USE_UNIX_SOCKETS
++  struct sockaddr_un   sau;
++#endif
+ } srvr_sockaddr_union_t;
+ 
+ #endif /* HEADER_CURL_SERVER_SOCKADDR_H */
+diff --git a/tests/server/sws.c b/tests/server/sws.c
+index 0739a70..24ecb8f 100644
+--- a/tests/server/sws.c
++++ b/tests/server/sws.c
+@@ -70,6 +70,9 @@ static enum {
+ #ifdef ENABLE_IPV6
+   , socket_domain_inet6 = AF_INET6
+ #endif
++#ifdef USE_UNIX_SOCKETS
++  , socket_domain_unix = AF_UNIX
++#endif
+ } socket_domain = AF_INET;
+ static bool use_gopher = FALSE;
+ static int serverlogslocked = 0;
+@@ -1359,6 +1362,11 @@ static curl_socket_t connect_to(const char *ipaddr, unsigned short port)
+     rc = connect(serverfd, &serveraddr.sa, sizeof(serveraddr.sa6));
+     break;
+ #endif /* ENABLE_IPV6 */
++#ifdef USE_UNIX_SOCKETS
++  case AF_UNIX:
++    logmsg("Proxying through UNIX socket is not (yet?) supported.");
++    return CURL_SOCKET_BAD;
++#endif /* USE_UNIX_SOCKETS */
+   }
+ 
+   if(got_exit_signal) {
+@@ -1928,6 +1936,10 @@ int main(int argc, char *argv[])
+   int wrotepidfile = 0;
+   int flag;
+   unsigned short port = DEFAULT_PORT;
++#ifdef USE_UNIX_SOCKETS
++  const char *unix_socket = NULL;
++  bool unlink_socket = false;
++#endif
+   char *pidname= (char *)".http.pid";
+   struct httprequest req;
+   int rc;
+@@ -1948,6 +1960,9 @@ int main(int argc, char *argv[])
+ #ifdef ENABLE_IPV6
+              "/IPv6"
+ #endif
++#ifdef USE_UNIX_SOCKETS
++             "/unix"
++#endif
+           );
+       return 0;
+     }
+@@ -1980,6 +1995,23 @@ int main(int argc, char *argv[])
+ #endif
+       arg++;
+     }
++    else if(!strcmp("--unix-socket", argv[arg])) {
++      arg++;
++      if(argc>arg) {
++#ifdef USE_UNIX_SOCKETS
++        unix_socket = argv[arg];
++        if(strlen(unix_socket) >= sizeof(me.sau.sun_path)) {
++          fprintf(stderr, "sws: socket path must be shorter than %zu chars\n",
++                  sizeof(me.sau.sun_path));
++          return 0;
++        }
++        socket_type = "unix";
++        socket_domain = AF_UNIX;
++        location_str = unix_socket;
++#endif
++        arg++;
++      }
++    }
+     else if(!strcmp("--port", argv[arg])) {
+       arg++;
+       if(argc>arg) {
+@@ -2020,6 +2052,7 @@ int main(int argc, char *argv[])
+            " --pidfile [file]\n"
+            " --ipv4\n"
+            " --ipv6\n"
++           " --unix-socket [file]\n"
+            " --port [port]\n"
+            " --srcdir [path]\n"
+            " --connect [ip4-addr]\n"
+@@ -2083,6 +2116,14 @@ int main(int argc, char *argv[])
+     rc = bind(sock, &me.sa, sizeof(me.sa6));
+     break;
+ #endif /* ENABLE_IPV6 */
++#ifdef USE_UNIX_SOCKETS
++  case AF_UNIX:
++    memset(&me.sau, 0, sizeof(me.sau));
++    me.sau.sun_family = AF_UNIX;
++    strncpy(me.sau.sun_path, unix_socket, sizeof(me.sau.sun_path));
++    rc = bind(sock, &me.sa, sizeof(me.sau));
++    break;
++#endif /* USE_UNIX_SOCKETS */
+   }
+   if(0 != rc) {
+     error = SOCKERRNO;
+@@ -2103,6 +2144,11 @@ int main(int argc, char *argv[])
+     goto sws_cleanup;
+   }
+ 
++#ifdef USE_UNIX_SOCKETS
++  /* listen succeeds, so let's assume a valid listening UNIX socket */
++  unlink_socket = true;
++#endif
++
+   /*
+   ** As soon as this server writes its pid file the test harness will
+   ** attempt to connect to this server and initiate its verification.
+@@ -2242,6 +2288,13 @@ sws_cleanup:
+   if(sock != CURL_SOCKET_BAD)
+     sclose(sock);
+ 
++#ifdef USE_UNIX_SOCKETS
++  if(unlink_socket && socket_domain == AF_UNIX) {
++    rc = unlink(unix_socket);
++    logmsg("unlink(%s) = %d (%s)", unix_socket, rc, strerror(rc));
++  }
++#endif
++
+   if(got_exit_signal)
+     logmsg("signalled to die");
+ 
+-- 
+2.5.2
+
+
+From d04ea6f7f09e1556f80c4bbf4fc9497f83bc37a6 Mon Sep 17 00:00:00 2001
+From: Peter Wu <peter@lekensteyn.nl>
+Date: Thu, 27 Nov 2014 23:59:23 +0100
+Subject: [PATCH 05/11] tests: add HTTP UNIX socket server testing support
+
+The variable `$ipvnum` can now contain "unix" besides the integers 4
+and 6 since the variable. Functions which receive this parameter
+have their `$port` parameter renamed to `$port_or_path` to support a
+path to the UNIX domain socket (as a "port" is only meaningful for TCP).
+
+Signed-off-by: Peter Wu <peter@lekensteyn.nl>
+
+Upstream-commit: f1cc2a2c0cf8e191e606c6093c679fbee95e8809
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ tests/FILEFORMAT    |  2 ++
+ tests/README        |  3 ++
+ tests/httpserver.pl | 15 ++++++++-
+ tests/runtests.pl   | 96 +++++++++++++++++++++++++++++++++++++++++++++--------
+ tests/serverhelp.pm |  4 +--
+ 5 files changed, 104 insertions(+), 16 deletions(-)
+
+diff --git a/tests/FILEFORMAT b/tests/FILEFORMAT
+index 96cd5c8..702368f 100644
+--- a/tests/FILEFORMAT
++++ b/tests/FILEFORMAT
+@@ -165,6 +165,7 @@ smtp
+ httptls+srp
+ httptls+srp-ipv6
+ http-proxy
++http-unix
+ 
+ Give only one per line.  This subsection is mandatory.
+ </server>
+@@ -284,6 +285,7 @@ Available substitute variables include:
+ %HTTPPORT  - Port number of the HTTP server
+ %HOST6IP   - IPv6 address of the host running this test
+ %HTTP6PORT - IPv6 port number of the HTTP server
++%HTTPUNIXPATH - Path to the UNIX socket of the HTTP server
+ %HTTPSPORT - Port number of the HTTPS server
+ %PROXYPORT - Port number of the HTTP proxy
+ %FTPPORT   - Port number of the FTP server
+diff --git a/tests/README b/tests/README
+index fff618e..b442693 100644
+--- a/tests/README
++++ b/tests/README
+@@ -80,6 +80,9 @@ The cURL Test Suite
+   machine, or just move the servers in case you have local services on any of
+   those ports.
+ 
++  The HTTP server supports listening on a UNIX domain socket, the default
++  location is 'http.sock'.
++
+  1.4 Run
+ 
+   'make test'. This builds the test suite support code and invokes the
+diff --git a/tests/httpserver.pl b/tests/httpserver.pl
+index a38c3ce..1b8c3d2 100755
+--- a/tests/httpserver.pl
++++ b/tests/httpserver.pl
+@@ -36,6 +36,7 @@ use serverhelp qw(
+ 
+ my $verbose = 0;     # set to 1 for debugging
+ my $port = 8990;     # just a default
++my $unix_socket;     # location to place a listening UNIX socket
+ my $ipvnum = 4;      # default IP version of http server
+ my $idnum = 1;       # dafault http server instance number
+ my $proto = 'http';  # protocol the http server speaks
+@@ -74,6 +75,13 @@ while(@ARGV) {
+     elsif($ARGV[0] eq '--ipv6') {
+         $ipvnum = 6;
+     }
++    elsif($ARGV[0] eq '--unix-socket') {
++        $ipvnum = 'unix';
++        if($ARGV[1]) {
++            $unix_socket = $ARGV[1];
++            shift @ARGV;
++        }
++    }
+     elsif($ARGV[0] eq '--gopher') {
+         $gopher = 1;
+     }
+@@ -117,7 +125,12 @@ if(!$logfile) {
+ $flags .= "--pidfile \"$pidfile\" --logfile \"$logfile\" ";
+ $flags .= "--gopher " if($gopher);
+ $flags .= "--connect $connect " if($connect);
+-$flags .= "--ipv$ipvnum --port $port --srcdir \"$srcdir\"";
++if($ipvnum eq 'unix') {
++    $flags .= "--unix-socket '$unix_socket' ";
++} else {
++    $flags .= "--ipv$ipvnum --port $port ";
++}
++$flags .= "--srcdir \"$srcdir\"";
+ 
+ if($verbose) {
+     print STDERR "RUN: server/sws $flags\n";
+diff --git a/tests/runtests.pl b/tests/runtests.pl
+index b39da66..fa96345 100755
+--- a/tests/runtests.pl
++++ b/tests/runtests.pl
+@@ -140,6 +140,7 @@ my $GOPHER6PORT;         # Gopher IPv6 server port
+ my $HTTPTLSPORT;         # HTTP TLS (non-stunnel) server port
+ my $HTTPTLS6PORT;        # HTTP TLS (non-stunnel) IPv6 server port
+ my $HTTPPROXYPORT;       # HTTP proxy port, when using CONNECT
++my $HTTPUNIXPATH;        # HTTP server UNIX domain socket path
+ 
+ my $srcdir = $ENV{'srcdir'} || '.';
+ my $CURL="../src/curl".exe_ext(); # what curl executable to run on the tests
+@@ -201,10 +202,12 @@ my $ssl_version; # set if libcurl is built with SSL support
+ my $large_file;  # set if libcurl is built with large file support
+ my $has_idn;     # set if libcurl is built with IDN support
+ my $http_ipv6;   # set if HTTP server has IPv6 support
++my $http_unix;   # set if HTTP server has UNIX sockets support
+ my $ftp_ipv6;    # set if FTP server has IPv6 support
+ my $tftp_ipv6;   # set if TFTP server has IPv6 support
+ my $gopher_ipv6; # set if Gopher server has IPv6 support
+ my $has_ipv6;    # set if libcurl is built with IPv6 support
++my $has_unix;    # set if libcurl is built with UNIX sockets support
+ my $has_libz;    # set if libcurl is built with libz support
+ my $has_getrlimit;  # set if system has getrlimit()
+ my $has_ntlm;    # set if libcurl is built with NTLM support
+@@ -358,6 +361,13 @@ sub init_serverpidfile_hash {
+       }
+     }
+   }
++  for my $proto (('http', 'imap', 'pop3', 'smtp')) {
++    for my $ssl (('', 's')) {
++      my $serv = servername_id("$proto$ssl", "unix", 1);
++      my $pidf = server_pidfilename("$proto$ssl", "unix", 1);
++      $serverpidfile{$serv} = $pidf;
++    }
++  }
+ }
+ 
+ #######################################################################
+@@ -641,11 +651,11 @@ sub stopserver {
+     # All servers relative to the given one must be stopped also
+     #
+     my @killservers;
+-    if($server =~ /^(ftp|http|imap|pop3|smtp)s((\d*)(-ipv6|))$/) {
++    if($server =~ /^(ftp|http|imap|pop3|smtp)s((\d*)(-ipv6|-unix|))$/) {
+         # given a stunnel based ssl server, also kill non-ssl underlying one
+         push @killservers, "${1}${2}";
+     }
+-    elsif($server =~ /^(ftp|http|imap|pop3|smtp)((\d*)(-ipv6|))$/) {
++    elsif($server =~ /^(ftp|http|imap|pop3|smtp)((\d*)(-ipv6|-unix|))$/) {
+         # given a non-ssl server, also kill stunnel based ssl piggybacking one
+         push @killservers, "${1}s${2}";
+     }
+@@ -691,10 +701,12 @@ sub stopserver {
+ # assign requested address")
+ #
+ sub verifyhttp {
+-    my ($proto, $ipvnum, $idnum, $ip, $port) = @_;
++    my ($proto, $ipvnum, $idnum, $ip, $port_or_path) = @_;
+     my $server = servername_id($proto, $ipvnum, $idnum);
+     my $pid = 0;
+     my $bonus="";
++    # $port_or_path contains a path for UNIX sockets, sws ignores the port
++    my $port = ($ipvnum eq "unix") ? 80 : $port_or_path;
+ 
+     my $verifyout = "$LOGDIR/".
+         servername_canon($proto, $ipvnum, $idnum) .'_verify.out';
+@@ -714,6 +726,7 @@ sub verifyhttp {
+     $flags .= "--silent ";
+     $flags .= "--verbose ";
+     $flags .= "--globoff ";
++    $flags .= "--unix-socket '$port_or_path' " if $ipvnum eq "unix";
+     $flags .= "-1 "         if($has_axtls);
+     $flags .= "--insecure " if($proto eq 'https');
+     $flags .= "\"$proto://$ip:$port/${bonus}verifiedserver\"";
+@@ -1160,7 +1173,7 @@ sub responsiveserver {
+ # start the http server
+ #
+ sub runhttpserver {
+-    my ($proto, $verbose, $alt, $port) = @_;
++    my ($proto, $verbose, $alt, $port_or_path) = @_;
+     my $ip = $HOSTIP;
+     my $ipvnum = 4;
+     my $idnum = 1;
+@@ -1188,6 +1201,10 @@ sub runhttpserver {
+     if ($doesntrun{$pidfile}) {
+         return (0,0);
+     }
++    elsif($alt eq "unix") {
++        # IP (protocol) is mutually exclusive with UNIX sockets
++        $ipvnum = "unix";
++    }
+ 
+     my $pid = processexists($pidfile);
+     if($pid > 0) {
+@@ -1204,7 +1221,12 @@ sub runhttpserver {
+     $flags .= "--verbose " if($debugprotocol);
+     $flags .= "--pidfile \"$pidfile\" --logfile \"$logfile\" ";
+     $flags .= "--id $idnum " if($idnum > 1);
+-    $flags .= "--ipv$ipvnum --port $port --srcdir \"$srcdir\"";
++    if($ipvnum eq "unix") {
++        $flags .= "--unix-socket '$port_or_path' ";
++    } else {
++        $flags .= "--ipv$ipvnum --port $port_or_path ";
++    }
++    $flags .= "--srcdir \"$srcdir\"";
+ 
+     my $cmd = "$perl $srcdir/httpserver.pl $flags";
+     my ($httppid, $pid2) = startnew($cmd, $pidfile, 15, 0);
+@@ -1219,7 +1241,7 @@ sub runhttpserver {
+     }
+ 
+     # Server is up. Verify that we can speak to it.
+-    my $pid3 = verifyserver($proto, $ipvnum, $idnum, $ip, $port);
++    my $pid3 = verifyserver($proto, $ipvnum, $idnum, $ip, $port_or_path);
+     if(!$pid3) {
+         logmsg "RUN: $srvrname server failed verification\n";
+         # failed to talk to it properly. Kill the server and return failure
+@@ -1984,7 +2006,7 @@ sub runsocksserver {
+ # be used to verify that a server present in %run hash is still functional
+ #
+ sub responsive_http_server {
+-    my ($proto, $verbose, $alt, $port) = @_;
++    my ($proto, $verbose, $alt, $port_or_path) = @_;
+     my $ip = $HOSTIP;
+     my $ipvnum = 4;
+     my $idnum = 1;
+@@ -1997,8 +2019,12 @@ sub responsive_http_server {
+     elsif($alt eq "proxy") {
+         $idnum = 2;
+     }
++    elsif($alt eq "unix") {
++        # IP (protocol) is mutually exclusive with UNIX sockets
++        $ipvnum = "unix";
++    }
+ 
+-    return &responsiveserver($proto, $ipvnum, $idnum, $ip, $port);
++    return &responsiveserver($proto, $ipvnum, $idnum, $ip, $port_or_path);
+ }
+ 
+ #######################################################################
+@@ -2264,9 +2290,10 @@ sub checksystem {
+             @protocols = split(' ', lc($1));
+ 
+             # Generate a "proto-ipv6" version of each protocol to match the
+-            # IPv6 <server> name. This works even if IPv6 support isn't
++            # IPv6 <server> name and a "proto-unix" to match the variant which
++            # uses UNIX domain sockets. This works even if support isn't
+             # compiled in because the <features> test will fail.
+-            push @protocols, map($_ . '-ipv6', @protocols);
++            push @protocols, map(("$_-ipv6", "$_-unix"), @protocols);
+ 
+             # 'http-proxy' is used in test cases to do CONNECT through
+             push @protocols, 'http-proxy';
+@@ -2299,6 +2326,9 @@ sub checksystem {
+             if($feat =~ /IPv6/i) {
+                 $has_ipv6 = 1;
+             }
++            if($feat =~ /unix-sockets/i) {
++                $has_unix = 1;
++            }
+             if($feat =~ /libz/i) {
+                 $has_libz = 1;
+             }
+@@ -2396,6 +2426,12 @@ sub checksystem {
+         }
+     }
+ 
++    if($has_unix) {
++        # client has UNIX sockets support, check whether the HTTP server has it
++        my @sws = `server/sws --version`;
++        $http_unix = 1 if($sws[0] =~ /unix/);
++    }
++
+     if(!$curl_debug && $torture) {
+         die "can't run torture tests since curl was not built with curldebug";
+     }
+@@ -2423,6 +2459,7 @@ sub checksystem {
+     logmsg sprintf("  track memory: %s\n", $curl_debug?"ON ":"OFF");
+     logmsg sprintf("* valgrind:     %8s", $valgrind?"ON ":"OFF");
+     logmsg sprintf("  HTTP IPv6     %s\n", $http_ipv6?"ON ":"OFF");
++    logmsg sprintf("* HTTP UNIX     %s\n", $http_unix?"ON ":"OFF");
+     logmsg sprintf("* FTP IPv6      %8s", $ftp_ipv6?"ON ":"OFF");
+     logmsg sprintf("  Libtool lib:  %s\n", $libtool?"ON ":"OFF");
+     logmsg sprintf("* Shared build:      %s\n", $has_shared);
+@@ -2473,6 +2510,13 @@ sub checksystem {
+         logmsg "\n";
+     }
+ 
++    if($has_unix) {
++        logmsg "* UNIX socket paths:\n";
++        if($http_unix) {
++            logmsg sprintf("*   HTTP-UNIX:%s\n", $HTTPUNIXPATH);
++        }
++    }
++
+     $has_textaware = ($^O eq 'MSWin32') || ($^O eq 'msys');
+ 
+     logmsg "***************************************** \n";
+@@ -2520,6 +2564,10 @@ sub subVariables {
+   $$thing =~ s/%TFTP6PORT/$TFTP6PORT/g;
+   $$thing =~ s/%TFTPPORT/$TFTPPORT/g;
+ 
++  # server UNIX domain socket paths
++
++  $$thing =~ s/%HTTPUNIXPATH/$HTTPUNIXPATH/g;
++
+   # client IP addresses
+ 
+   $$thing =~ s/%CLIENT6IP/$CLIENT6IP/g;
+@@ -2707,6 +2755,11 @@ sub singletest {
+                 next;
+             }
+         }
++        elsif($f eq "unix-sockets") {
++            if($has_unix) {
++                next;
++            }
++        }
+         elsif($f eq "libz") {
+             if($has_libz) {
+                 next;
+@@ -3219,11 +3272,11 @@ sub singletest {
+         my @killservers;
+         foreach my $server (@killtestservers) {
+             chomp $server;
+-            if($server =~ /^(ftp|http|imap|pop3|smtp)s((\d*)(-ipv6|))$/) {
++            if($server =~ /^(ftp|http|imap|pop3|smtp)s((\d*)(-ipv6|-unix|))$/) {
+                 # given a stunnel ssl server, also kill non-ssl underlying one
+                 push @killservers, "${1}${2}";
+             }
+-            elsif($server =~ /^(ftp|http|imap|pop3|smtp)((\d*)(-ipv6|))$/) {
++            elsif($server =~ /^(ftp|http|imap|pop3|smtp)((\d*)(-ipv6|-unix|))$/) {
+                 # given a non-ssl server, also kill stunnel piggybacking one
+                 push @killservers, "${1}s${2}";
+             }
+@@ -3728,7 +3781,7 @@ sub startservers {
+         $what =~ s/[^a-z0-9-]//g;
+ 
+         my $certfile;
+-        if($what =~ /^(ftp|http|imap|pop3|smtp)s((\d*)(-ipv6|))$/) {
++        if($what =~ /^(ftp|http|imap|pop3|smtp)s((\d*)(-ipv6|-unix|))$/) {
+             $certfile = ($whatlist[1]) ? $whatlist[1] : 'stunnel.pem';
+         }
+ 
+@@ -4066,6 +4119,22 @@ sub startservers {
+                 }
+             }
+         }
++        elsif($what eq "http-unix") {
++            if($torture && $run{'http-unix'} &&
++               !responsive_http_server("http", $verbose, "unix", $HTTPUNIXPATH)) {
++                stopserver('http-unix');
++            }
++            if(!$run{'http-unix'}) {
++                ($pid, $pid2) = runhttpserver("http", $verbose, "unix",
++                                              $HTTPUNIXPATH);
++                if($pid <= 0) {
++                    return "failed starting HTTP-unix server";
++                }
++                logmsg sprintf("* pid http-unix => %d %d\n", $pid, $pid2)
++                    if($verbose);
++                $run{'http-unix'}="$pid $pid2";
++            }
++        }
+         elsif($what eq "none") {
+             logmsg "* starts no server\n" if ($verbose);
+         }
+@@ -4502,6 +4571,7 @@ $GOPHER6PORT     = $base++; # Gopher IPv6 server port
+ $HTTPTLSPORT     = $base++; # HTTP TLS (non-stunnel) server port
+ $HTTPTLS6PORT    = $base++; # HTTP TLS (non-stunnel) IPv6 server port
+ $HTTPPROXYPORT   = $base++; # HTTP proxy port, when using CONNECT
++$HTTPUNIXPATH    = 'http.sock'; # HTTP server UNIX domain socket path
+ 
+ #######################################################################
+ # clear and create logging directory:
+diff --git a/tests/serverhelp.pm b/tests/serverhelp.pm
+index a1d1dc3..1fc621b 100644
+--- a/tests/serverhelp.pm
++++ b/tests/serverhelp.pm
+@@ -109,8 +109,8 @@ sub servername_str {
+ 
+     $ipver = (not $ipver) ? 'ipv4' : lc($ipver);
+     die "unsupported IP version: '$ipver'" unless($ipver &&
+-        ($ipver =~ /^(4|6|ipv4|ipv6|-ipv4|-ipv6)$/));
+-    $ipver = ($ipver =~ /6$/) ? '-IPv6' : '';
++        ($ipver =~ /^(4|6|ipv4|ipv6|-ipv4|-ipv6|unix)$/));
++    $ipver = ($ipver =~ /6$/) ? '-IPv6' : (($ipver =~ /unix$/) ? '-unix' : '');
+ 
+     $idnum = 1 if(not $idnum);
+     die "unsupported ID number: '$idnum'" unless($idnum &&
+-- 
+2.5.2
+
+
+From d2f7b1d51e356586356da87d1ae32c0c44274887 Mon Sep 17 00:00:00 2001
+From: Peter Wu <peter@lekensteyn.nl>
+Date: Thu, 27 Nov 2014 23:59:24 +0100
+Subject: [PATCH 06/11] tests: add two HTTP over UNIX socket tests
+
+test1435: a simple test that checks whether a HTTP request can be
+performed over the UNIX socket. The hostname/port are interpreted
+by sws and should be ignored by cURL.
+
+test1436: test for the ability to do two requests to the same host,
+interleaved with one to a different hostname.
+
+Signed-off-by: Peter Wu <peter@lekensteyn.nl>
+
+Upstream-commit: 479abdd32eee15dab78d0cd6b1786d569680f0ac
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ tests/data/Makefile.am |  1 +
+ tests/data/Makefile.in |  1 +
+ tests/data/test1435    | 46 +++++++++++++++++++++++++++
+ tests/data/test1436    | 85 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 133 insertions(+)
+ create mode 100644 tests/data/test1435
+ create mode 100644 tests/data/test1436
+
+diff --git a/tests/data/Makefile.am b/tests/data/Makefile.am
+index c4f76df..35bc6eb 100644
+--- a/tests/data/Makefile.am
++++ b/tests/data/Makefile.am
+@@ -93,6 +93,7 @@ test1379 test1380 test1381 test1382 test1383 test1384 test1385 test1386 \
+ test1387 test1388 test1389 test1390 test1391 test1392 test1393 \
+ test1400 test1401 test1402 test1403 test1404 test1405 test1406 test1407 \
+ test1408 test1409 test1410 test1411 test1412 test1413 test1415 \
++test1435 test1436 \
+ test1500 test1501 test1502 test1503 test1504 test1505 test1506 test1507 \
+ test1508 test1529 \
+ test2000 test2001 test2002 test2003 test2004 test2005 test2006 test2007 \
+diff --git a/tests/data/Makefile.in b/tests/data/Makefile.in
+index e73ca96..d5e5f01 100644
+--- a/tests/data/Makefile.in
++++ b/tests/data/Makefile.in
+@@ -357,6 +357,7 @@ test1379 test1380 test1381 test1382 test1383 test1384 test1385 test1386 \
+ test1387 test1388 test1389 test1390 test1391 test1392 test1393 \
+ test1400 test1401 test1402 test1403 test1404 test1405 test1406 test1407 \
+ test1408 test1409 test1410 test1411 test1412 test1413 test1415 \
++test1435 test1436 \
+ test1500 test1501 test1502 test1503 test1504 test1505 test1506 test1507 \
+ test1508 test1529 \
+ test2000 test2001 test2002 test2003 test2004 test2005 test2006 test2007 \
+diff --git a/tests/data/test1435 b/tests/data/test1435
+new file mode 100644
+index 0000000..56ff9d1
+--- /dev/null
++++ b/tests/data/test1435
+@@ -0,0 +1,46 @@
++<testcase>
++<info>
++<keywords>
++HTTP
++HTTP GET
++unix sockets
++</keywords>
++</info>
++
++<reply>
++<data>
++HTTP/1.1 200 OK
++Date: Sun, 16 Nov 2014 23:47:38 GMT
++Content-Length: 17
++
++Based on test300
++</data>
++</reply>
++
++<client>
++<features>
++unix-sockets
++</features>
++<server>
++http-unix
++</server>
++ <name>
++simple HTTP GET over UNIX socket
++ </name>
++ <command>
++--unix-socket %HTTPUNIXPATH http://server-interpreted.example.com/1435
++</command>
++</client>
++
++<verify>
++<strip>
++^User-Agent:.*
++</strip>
++<protocol>
++GET /1435 HTTP/1.1
++Host: server-interpreted.example.com
++Accept: */*
++
++</protocol>
++</verify>
++</testcase>
+diff --git a/tests/data/test1436 b/tests/data/test1436
+new file mode 100644
+index 0000000..b16eadd
+--- /dev/null
++++ b/tests/data/test1436
+@@ -0,0 +1,85 @@
++<testcase>
++<info>
++<keywords>
++HTTP
++HTTP GET
++unix sockets
++</keywords>
++</info>
++
++<reply>
++<data1>
++HTTP/1.1 200 OK
++Date: Mon, 17 Nov 2014 13:42:47 GMT
++Content-Length: 6
++
++First
++</data1>
++<data2>
++HTTP/1.1 200 OK
++Date: Mon, 17 Nov 2014 13:42:48 GMT
++Content-Length: 7
++
++Second
++</data2>
++<data3>
++HTTP/1.1 200 OK
++Date: Mon, 17 Nov 2014 13:42:49 GMT
++Content-Length: 6
++
++Third
++</data3>
++</reply>
++
++<client>
++<features>
++unix-sockets
++</features>
++<server>
++http-unix
++</server>
++ <name>
++HTTP requests with multiple connections over UNIX socket
++ </name>
++ <command>
++--unix-socket %HTTPUNIXPATH http://one.example.com/14360001 http://two.example.com/14360002 http://one.example.com/14360003
++</command>
++</client>
++
++<verify>
++<strip>
++^User-Agent:.*
++</strip>
++<protocol>
++GET /14360001 HTTP/1.1
++Host: one.example.com
++Accept: */*
++
++GET /14360002 HTTP/1.1
++Host: two.example.com
++Accept: */*
++
++GET /14360003 HTTP/1.1
++Host: one.example.com
++Accept: */*
++
++</protocol>
++<stdout>
++HTTP/1.1 200 OK
++Date: Mon, 17 Nov 2014 13:42:47 GMT
++Content-Length: 6
++
++First
++HTTP/1.1 200 OK
++Date: Mon, 17 Nov 2014 13:42:48 GMT
++Content-Length: 7
++
++Second
++HTTP/1.1 200 OK
++Date: Mon, 17 Nov 2014 13:42:49 GMT
++Content-Length: 6
++
++Third
++</stdout>
++</verify>
++</testcase>
+-- 
+2.5.2
+
+
+From f784b2d3d6cf08193662a23aae9305f11c4a4559 Mon Sep 17 00:00:00 2001
+From: Peter Wu <peter@lekensteyn.nl>
+Date: Thu, 27 Nov 2014 23:59:25 +0100
+Subject: [PATCH 07/11] libcurl: add UNIX domain sockets support
+
+The ability to do HTTP requests over a UNIX domain socket has been
+requested before, in Apr 2008 [0][1] and Sep 2010 [2]. While a
+discussion happened, no patch seems to get through. I decided to give it
+a go since I need to test a nginx HTTP server which listens on a UNIX
+domain socket.
+
+One patch [3] seems to make it possible to use the
+CURLOPT_OPENSOCKETFUNCTION function to gain a UNIX domain socket.
+Another person wrote a Go program which can do HTTP over a UNIX socket
+for Docker[4] which uses a special URL scheme (though the name contains
+cURL, it has no relation to the cURL library).
+
+This patch considers support for UNIX domain sockets at the same level
+as HTTP proxies / IPv6, it acts as an intermediate socket provider and
+not as a separate protocol. Since this feature affects network
+operations, a new feature flag was added ("unix-sockets") with a
+corresponding CURL_VERSION_UNIX_SOCKETS macro.
+
+A new CURLOPT_UNIX_SOCKET_PATH option is added and documented. This
+option enables UNIX domain sockets support for all requests on the
+handle (replacing IP sockets and skipping proxies).
+
+A new configure option (--enable-unix-sockets) and CMake option
+(ENABLE_UNIX_SOCKETS) can disable this optional feature. Note that I
+deliberately did not mark this feature as advanced, this is a
+feature/component that should easily be available.
+
+ [0]: http://curl.haxx.se/mail/lib-2008-04/0279.html
+ [1]: http://daniel.haxx.se/blog/2008/04/14/http-over-unix-domain-sockets/
+ [2]: http://sourceforge.net/p/curl/feature-requests/53/
+ [3]: http://curl.haxx.se/mail/lib-2008-04/0361.html
+ [4]: https://github.com/Soulou/curl-unix-socket
+
+Signed-off-by: Peter Wu <peter@lekensteyn.nl>
+
+Upstream-commit: 970c22f970f0172e6a4c98ccc3176c740ddaa1c6
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ configure                        | 112 +++++++++++++++++++++++++++++++++++++++
+ configure.ac                     |  38 +++++++++++++
+ docs/libcurl/curl_easy_setopt.3  |  12 +++++
+ docs/libcurl/curl_version_info.3 |   2 +
+ docs/libcurl/symbols-in-versions |   2 +
+ include/curl/curl.h              |   4 ++
+ lib/Makefile.in                  |   1 +
+ lib/curl_addrinfo.c              |  39 ++++++++++++++
+ lib/curl_addrinfo.h              |   4 ++
+ lib/curl_config.h.in             |   3 ++
+ lib/url.c                        |  44 +++++++++++++++
+ lib/urldata.h                    |   4 ++
+ lib/version.c                    |   3 ++
+ src/Makefile.in                  |   1 +
+ src/tool_getparam.c              |   3 +-
+ tests/server/Makefile.in         |   1 +
+ 16 files changed, 272 insertions(+), 1 deletion(-)
+
+diff --git a/configure b/configure
+index c5d1817..3e1f5d3 100755
+--- a/configure
++++ b/configure
+@@ -889,6 +889,7 @@ SONAME_BUMP_TRUE
+ CFLAG_CURL_SYMBOL_HIDING
+ DOING_CURL_SYMBOL_HIDING_FALSE
+ DOING_CURL_SYMBOL_HIDING_TRUE
++USE_UNIX_SOCKETS
+ BUILD_LIBHOSTNAME_FALSE
+ BUILD_LIBHOSTNAME_TRUE
+ USE_EMBEDDED_ARES_FALSE
+@@ -1159,6 +1160,7 @@ enable_sspi
+ enable_crypto_auth
+ enable_ntlm_wb
+ enable_tls_srp
++enable_unix_sockets
+ enable_cookies
+ enable_soname_bump
+ '
+@@ -1873,6 +1875,8 @@ Optional Features:
+                           helper
+   --enable-tls-srp        Enable TLS-SRP authentication
+   --disable-tls-srp       Disable TLS-SRP authentication
++  --enable-unix-sockets   Enable UNIX domain sockets
++  --disable-unix-sockets  Disable UNIX domain sockets
+   --enable-cookies        Enable cookies support
+   --disable-cookies       Disable cookies support
+   --enable-soname-bump    Enable enforced SONAME bump
+@@ -2607,6 +2611,61 @@ $as_echo "$ac_res" >&6; }
+   eval $as_lineno_stack; ${as_lineno_stack:+:} unset as_lineno
+ 
+ } # ac_fn_c_check_type
++
++# ac_fn_c_check_member LINENO AGGR MEMBER VAR INCLUDES
++# ----------------------------------------------------
++# Tries to find if the field MEMBER exists in type AGGR, after including
++# INCLUDES, setting cache variable VAR accordingly.
++ac_fn_c_check_member ()
++{
++  as_lineno=${as_lineno-"$1"} as_lineno_stack=as_lineno_stack=$as_lineno_stack
++  { $as_echo "$as_me:${as_lineno-$LINENO}: checking for $2.$3" >&5
++$as_echo_n "checking for $2.$3... " >&6; }
++if eval \${$4+:} false; then :
++  $as_echo_n "(cached) " >&6
++else
++  cat confdefs.h - <<_ACEOF >conftest.$ac_ext
++/* end confdefs.h.  */
++$5
++int main (void)
++{
++static $2 ac_aggr;
++if (ac_aggr.$3)
++return 0;
++ ;
++ return 0;
++}
++_ACEOF
++if ac_fn_c_try_compile "$LINENO"; then :
++  eval "$4=yes"
++else
++  cat confdefs.h - <<_ACEOF >conftest.$ac_ext
++/* end confdefs.h.  */
++$5
++int main (void)
++{
++static $2 ac_aggr;
++if (sizeof ac_aggr.$3)
++return 0;
++ ;
++ return 0;
++}
++_ACEOF
++if ac_fn_c_try_compile "$LINENO"; then :
++  eval "$4=yes"
++else
++  eval "$4=no"
++fi
++rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
++fi
++rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
++fi
++eval ac_res=\$$4
++	       { $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_res" >&5
++$as_echo "$ac_res" >&6; }
++  eval $as_lineno_stack; ${as_lineno_stack:+:} unset as_lineno
++
++} # ac_fn_c_check_member
+ cat >config.log <<_ACEOF
+ This file contains any messages produced by compilers while
+ running configure, to aid debugging if configure makes a mistake.
+@@ -5447,6 +5506,7 @@ PKGADD_VENDOR="curl.haxx.se"
+ curl_tls_srp_msg="no      (--enable-tls-srp)"
+     curl_res_msg="default (--enable-ares / --enable-threaded-resolver)"
+    curl_ipv6_msg="no      (--enable-ipv6)"
++curl_unix_sockets_msg="no      (--enable-unix-sockets)"
+     curl_idn_msg="no      (--with-{libidn,winidn})"
+  curl_manual_msg="no      (--enable-manual)"
+ curl_libcurl_msg="enabled (--disable-libcurl-option)"
+@@ -39239,6 +39299,53 @@ $as_echo "#define USE_TLS_SRP 1" >>confdefs.h
+    curl_tls_srp_msg="enabled"
+ fi
+ 
++{ $as_echo "$as_me:${as_lineno-$LINENO}: checking whether to enable UNIX domain sockets" >&5
++$as_echo_n "checking whether to enable UNIX domain sockets... " >&6; }
++# Check whether --enable-unix-sockets was given.
++if test "${enable_unix_sockets+set}" = set; then :
++  enableval=$enable_unix_sockets;  case "$enableval" in
++  no)  { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
++$as_echo "no" >&6; }
++       want_unix_sockets=no
++       ;;
++  *)   { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
++$as_echo "yes" >&6; }
++       want_unix_sockets=yes
++       ;;
++  esac
++else
++
++       { $as_echo "$as_me:${as_lineno-$LINENO}: result: auto" >&5
++$as_echo "auto" >&6; }
++       want_unix_sockets=auto
++
++
++fi
++
++if test "x$want_unix_sockets" != "xno"; then
++  ac_fn_c_check_member "$LINENO" "struct sockaddr_un" "sun_path" "ac_cv_member_struct_sockaddr_un_sun_path" "
++    #include <sys/un.h>
++
++"
++if test "x$ac_cv_member_struct_sockaddr_un_sun_path" = xyes; then :
++
++
++$as_echo "#define USE_UNIX_SOCKETS 1" >>confdefs.h
++
++    USE_UNIX_SOCKETS=1
++
++    curl_unix_sockets_msg="enabled"
++
++else
++
++    if test "x$want_unix_sockets" = "xyes"; then
++      as_fn_error $? "--enable-unix-sockets is not available on this platform!" "$LINENO" 5
++    fi
++
++fi
++
++fi
++
+ { $as_echo "$as_me:${as_lineno-$LINENO}: checking whether to enable support for cookies" >&5
+ $as_echo_n "checking whether to enable support for cookies... " >&6; }
+ # Check whether --enable-cookies was given.
+@@ -39357,6 +39464,9 @@ fi
+ if test "x$IPV6_ENABLED" = "x1"; then
+   SUPPORT_FEATURES="$SUPPORT_FEATURES IPv6"
+ fi
++if test "x$USE_UNIX_SOCKETS" = "x1"; then
++  SUPPORT_FEATURES="$SUPPORT_FEATURES unix-sockets"
++fi
+ if test "x$HAVE_LIBZ" = "x1"; then
+   SUPPORT_FEATURES="$SUPPORT_FEATURES libz"
+ fi
+@@ -42289,6 +42399,7 @@ _EOF
+   TLS-SRP support:  ${curl_tls_srp_msg}
+   resolver:         ${curl_res_msg}
+   ipv6 support:     ${curl_ipv6_msg}
++  UNIX sockets support: ${curl_unix_sockets_msg}
+   IDN support:      ${curl_idn_msg}
+   Build libcurl:    Shared=${enable_shared}, Static=${enable_static}
+   Built-in manual:  ${curl_manual_msg}
+@@ -42319,6 +42430,7 @@ $as_echo "$as_me: Configured to build curl/libcurl:
+   TLS-SRP support:  ${curl_tls_srp_msg}
+   resolver:         ${curl_res_msg}
+   ipv6 support:     ${curl_ipv6_msg}
++  UNIX sockets support: ${curl_unix_sockets_msg}
+   IDN support:      ${curl_idn_msg}
+   Build libcurl:    Shared=${enable_shared}, Static=${enable_static}
+   Built-in manual:  ${curl_manual_msg}
+diff --git a/configure.ac b/configure.ac
+index 60a6b58..9612c2f 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -156,6 +156,7 @@ dnl initialize all the info variables
+ curl_tls_srp_msg="no      (--enable-tls-srp)"
+     curl_res_msg="default (--enable-ares / --enable-threaded-resolver)"
+    curl_ipv6_msg="no      (--enable-ipv6)"
++curl_unix_sockets_msg="no      (--enable-unix-sockets)"
+     curl_idn_msg="no      (--with-{libidn,winidn})"
+  curl_manual_msg="no      (--enable-manual)"
+ curl_libcurl_msg="enabled (--disable-libcurl-option)"
+@@ -3302,6 +3303,39 @@ if test "$want_tls_srp" = "yes" && ( test "x$HAVE_GNUTLS_SRP" = "x1" || test "x$
+ fi
+ 
+ dnl ************************************************************
++dnl disable UNIX domain sockets support
++dnl
++AC_MSG_CHECKING([whether to enable UNIX domain sockets])
++AC_ARG_ENABLE(unix-sockets,
++AC_HELP_STRING([--enable-unix-sockets],[Enable UNIX domain sockets])
++AC_HELP_STRING([--disable-unix-sockets],[Disable UNIX domain sockets]),
++[ case "$enableval" in
++  no)  AC_MSG_RESULT(no)
++       want_unix_sockets=no
++       ;;
++  *)   AC_MSG_RESULT(yes)
++       want_unix_sockets=yes
++       ;;
++  esac ], [
++       AC_MSG_RESULT(auto)
++       want_unix_sockets=auto
++       ]
++)
++if test "x$want_unix_sockets" != "xno"; then
++  AC_CHECK_MEMBER([struct sockaddr_un.sun_path], [
++    AC_DEFINE(USE_UNIX_SOCKETS, 1, [Use UNIX domain sockets])
++    AC_SUBST(USE_UNIX_SOCKETS, [1])
++    curl_unix_sockets_msg="enabled"
++  ], [
++    if test "x$want_unix_sockets" = "xyes"; then
++      AC_MSG_ERROR([--enable-unix-sockets is not available on this platform!])
++    fi
++  ], [
++    #include <sys/un.h>
++  ])
++fi
++
++dnl ************************************************************
+ dnl disable cookies support
+ dnl
+ AC_MSG_CHECKING([whether to enable support for cookies])
+@@ -3382,6 +3416,9 @@ fi
+ if test "x$IPV6_ENABLED" = "x1"; then
+   SUPPORT_FEATURES="$SUPPORT_FEATURES IPv6"
+ fi
++if test "x$USE_UNIX_SOCKETS" = "x1"; then
++  SUPPORT_FEATURES="$SUPPORT_FEATURES unix-sockets"
++fi
+ if test "x$HAVE_LIBZ" = "x1"; then
+   SUPPORT_FEATURES="$SUPPORT_FEATURES libz"
+ fi
+@@ -3557,6 +3594,7 @@ AC_MSG_NOTICE([Configured to build curl/libcurl:
+   TLS-SRP support:  ${curl_tls_srp_msg}
+   resolver:         ${curl_res_msg}
+   ipv6 support:     ${curl_ipv6_msg}
++  UNIX sockets support: ${curl_unix_sockets_msg}
+   IDN support:      ${curl_idn_msg}
+   Build libcurl:    Shared=${enable_shared}, Static=${enable_static}
+   Built-in manual:  ${curl_manual_msg}
+diff --git a/docs/libcurl/curl_easy_setopt.3 b/docs/libcurl/curl_easy_setopt.3
+index d73b664..ad739e1 100644
+--- a/docs/libcurl/curl_easy_setopt.3
++++ b/docs/libcurl/curl_easy_setopt.3
+@@ -961,6 +961,18 @@ systems support this option. (Added in 7.25.0)
+ Pass a long. Sets the interval, in seconds, that the operating system will wait
+ between sending keepalive probes. Not all operating systems support this
+ option. (Added in 7.25.0)
++.IP CURLOPT_UNIX_SOCKET_PATH
++Pass a \fIpath\fP to a UNIX domain socket. This enables the use of UNIX domain
++sockets as connection end point and sets the path to \fIpath\fP. If \fIpath\fP
++is NULL, then UNIX domain sockets are disabled. An empty string will result in
++an error at some point.
++
++When enabled, cURL will connect to the UNIX domain socket instead of
++establishing a TCP connection to a host. Since no TCP connection is
++established, cURL does not need to resolve the DNS hostname in the URL.
++
++The maximum path length on Cygwin, Linux and Solaris is 107. On other platforms
++might be even less.
+ .SH NAMES and PASSWORDS OPTIONS (Authentication)
+ .IP CURLOPT_NETRC
+ This parameter controls the preference of libcurl between using user names and
+diff --git a/docs/libcurl/curl_version_info.3 b/docs/libcurl/curl_version_info.3
+index ccb2028..c148cbc 100644
+--- a/docs/libcurl/curl_version_info.3
++++ b/docs/libcurl/curl_version_info.3
+@@ -133,6 +133,8 @@ libcurl was built with support for TLS-SRP. (Added in 7.21.4)
+ .IP CURL_VERSION_NTLM_WB
+ libcurl was built with support for NTLM delegation to a winbind helper.
+ (Added in 7.22.0)
++.IP CURL_VERSION_UNIX_SOCKETS
++libcurl was built with support for UNIX domain sockets.
+ .RE
+ \fIssl_version\fP is an ASCII string for the OpenSSL version used. If libcurl
+ has no SSL support, this is NULL.
+diff --git a/docs/libcurl/symbols-in-versions b/docs/libcurl/symbols-in-versions
+index b275900..0f7469d 100644
+--- a/docs/libcurl/symbols-in-versions
++++ b/docs/libcurl/symbols-in-versions
+@@ -503,6 +503,7 @@ CURLOPT_TLSAUTH_TYPE            7.21.4
+ CURLOPT_TLSAUTH_USERNAME        7.21.4
+ CURLOPT_TRANSFERTEXT            7.1.1
+ CURLOPT_TRANSFER_ENCODING       7.21.6
++CURLOPT_UNIX_SOCKET_PATH        7.40.0
+ CURLOPT_UNRESTRICTED_AUTH       7.10.4
+ CURLOPT_UPLOAD                  7.1
+ CURLOPT_URL                     7.1
+@@ -703,6 +704,7 @@ CURL_VERSION_SPNEGO             7.10.8
+ CURL_VERSION_SSL                7.10
+ CURL_VERSION_SSPI               7.13.2
+ CURL_VERSION_TLSAUTH_SRP        7.21.4
++CURL_VERSION_UNIX_SOCKETS       7.40.0
+ CURL_WAIT_POLLIN                7.28.0
+ CURL_WAIT_POLLOUT               7.28.0
+ CURL_WAIT_POLLPRI               7.28.0
+diff --git a/include/curl/curl.h b/include/curl/curl.h
+index 8e548e3..14f6fd7 100644
+--- a/include/curl/curl.h
++++ b/include/curl/curl.h
+@@ -1536,6 +1536,9 @@ typedef enum {
+   /* set the SMTP auth originator */
+   CINIT(MAIL_AUTH, OBJECTPOINT, 217),
+ 
++  /* Path to UNIX domain socket */
++  CINIT(UNIX_SOCKET_PATH, OBJECTPOINT, 231),
++
+   CURLOPT_LASTENTRY /* the last unused */
+ } CURLoption;
+ 
+@@ -2154,6 +2157,7 @@ typedef struct {
+ #define CURL_VERSION_CURLDEBUG (1<<13) /* debug memory tracking supported */
+ #define CURL_VERSION_TLSAUTH_SRP (1<<14) /* TLS-SRP auth is supported */
+ #define CURL_VERSION_NTLM_WB   (1<<15) /* NTLM delegating to winbind helper */
++#define CURL_VERSION_UNIX_SOCKETS (1<<19) /* UNIX domain sockets support */
+ 
+  /*
+  * NAME curl_version_info()
+diff --git a/lib/Makefile.in b/lib/Makefile.in
+index ca02e27..5ad2600 100644
+--- a/lib/Makefile.in
++++ b/lib/Makefile.in
+@@ -386,6 +386,7 @@ USE_OPENLDAP = @USE_OPENLDAP@
+ USE_POLARSSL = @USE_POLARSSL@
+ USE_SCHANNEL = @USE_SCHANNEL@
+ USE_SSLEAY = @USE_SSLEAY@
++USE_UNIX_SOCKETS = @USE_UNIX_SOCKETS@
+ USE_WINDOWS_SSPI = @USE_WINDOWS_SSPI@
+ VERSION = @VERSION@
+ VERSIONED_FLAVOUR = @VERSIONED_FLAVOUR@
+diff --git a/lib/curl_addrinfo.c b/lib/curl_addrinfo.c
+index 10652c6..52e45ce 100644
+--- a/lib/curl_addrinfo.c
++++ b/lib/curl_addrinfo.c
+@@ -33,6 +33,9 @@
+ #ifdef HAVE_ARPA_INET_H
+ #  include <arpa/inet.h>
+ #endif
++#ifdef HAVE_SYS_UN_H
++#  include <sys/un.h>
++#endif
+ 
+ #ifdef __VMS
+ #  include <in.h>
+@@ -477,6 +480,42 @@ Curl_addrinfo *Curl_str2addr(char *address, int port)
+   return NULL; /* bad input format */
+ }
+ 
++#ifdef USE_UNIX_SOCKETS
++/**
++ * Given a path to a UNIX domain socket, return a newly allocated Curl_addrinfo
++ * struct initialized with this path.
++ */
++Curl_addrinfo *Curl_unix2addr(const char *path)
++{
++  Curl_addrinfo *ai;
++  struct sockaddr_un *sun;
++  size_t path_len;
++
++  ai = calloc(1, sizeof(Curl_addrinfo));
++  if(!ai)
++    return NULL;
++  if((ai->ai_addr = calloc(1, sizeof(struct sockaddr_un))) == NULL) {
++    free(ai);
++    return NULL;
++  }
++  /* sun_path must be able to store the NUL-terminated path */
++  path_len = strlen(path);
++  if(path_len >= sizeof(sun->sun_path)) {
++    free(ai->ai_addr);
++    free(ai);
++    return NULL;
++  }
++
++  ai->ai_family = AF_UNIX;
++  ai->ai_socktype = SOCK_STREAM; /* assume reliable transport for HTTP */
++  ai->ai_addrlen = (curl_socklen_t) sizeof(struct sockaddr_un);
++  sun = (void *) ai->ai_addr;
++  sun->sun_family = AF_UNIX;
++  memcpy(sun->sun_path, path, path_len + 1); /* copy NUL byte */
++  return ai;
++}
++#endif
++
+ #if defined(CURLDEBUG) && defined(HAVE_FREEADDRINFO)
+ /*
+  * curl_dofreeaddrinfo()
+diff --git a/lib/curl_addrinfo.h b/lib/curl_addrinfo.h
+index 6d2b753..4ef8827 100644
+--- a/lib/curl_addrinfo.h
++++ b/lib/curl_addrinfo.h
+@@ -79,6 +79,10 @@ Curl_ip2addr(int af, const void *inaddr, const char *hostname, int port);
+ 
+ Curl_addrinfo *Curl_str2addr(char *dotted, int port);
+ 
++#ifdef USE_UNIX_SOCKETS
++Curl_addrinfo *Curl_unix2addr(const char *path);
++#endif
++
+ #if defined(CURLDEBUG) && defined(HAVE_FREEADDRINFO)
+ void
+ curl_dofreeaddrinfo(struct addrinfo *freethis,
+diff --git a/lib/curl_config.h.in b/lib/curl_config.h.in
+index 1716c96..19b66fa 100644
+--- a/lib/curl_config.h.in
++++ b/lib/curl_config.h.in
+@@ -1017,6 +1017,9 @@
+ /* Use TLS-SRP authentication */
+ #undef USE_TLS_SRP
+ 
++/* Use UNIX domain sockets */
++#undef USE_UNIX_SOCKETS
++
+ /* Define to 1 if you have the `normaliz' (WinIDN) library (-lnormaliz). */
+ #undef USE_WIN32_IDN
+ 
+diff --git a/lib/url.c b/lib/url.c
+index 57944e4..7257b5e 100644
+--- a/lib/url.c
++++ b/lib/url.c
+@@ -47,6 +47,10 @@
+ #include <inet.h>
+ #endif
+ 
++#ifdef HAVE_SYS_UN_H
++#include <sys/un.h>
++#endif
++
+ #ifndef HAVE_SOCKET
+ #error "We can't compile without socket() support!"
+ #endif
+@@ -2429,6 +2433,13 @@ CURLcode Curl_setopt(struct SessionHandle *data, CURLoption option,
+     data->set.tcp_keepintvl = va_arg(param, long);
+     break;
+ 
++#ifdef USE_UNIX_SOCKETS
++  case CURLOPT_UNIX_SOCKET_PATH:
++    result = setstropt(&data->set.str[STRING_UNIX_SOCKET_PATH],
++                       va_arg(param, char *));
++    break;
++#endif
++
+   default:
+     /* unknown tag and its companion, just ignore: */
+     result = CURLE_UNKNOWN_OPTION;
+@@ -4764,6 +4775,32 @@ static CURLcode resolve_server(struct SessionHandle *data,
+     /* set a pointer to the hostname we display */
+     fix_hostname(data, conn, &conn->host);
+ 
++#ifdef USE_UNIX_SOCKETS
++    if(data->set.str[STRING_UNIX_SOCKET_PATH]) {
++      /* UNIX domain sockets are local. The host gets ignored, just use the
++       * specified domain socket address. Do not cache "DNS entries". There is
++       * no DNS involved and we already have the filesystem path available */
++      const char *path = data->set.str[STRING_UNIX_SOCKET_PATH];
++
++      hostaddr = calloc(1, sizeof(struct Curl_dns_entry));
++      if(!hostaddr)
++        result = CURLE_OUT_OF_MEMORY;
++      else if((hostaddr->addr = Curl_unix2addr(path)) != NULL)
++        hostaddr->inuse++;
++      else {
++        /* Long paths are not supported for now */
++        if(strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
++          failf(data, "UNIX socket path too long: '%s'", path);
++          result = CURLE_COULDNT_RESOLVE_HOST;
++        }
++        else
++          result = CURLE_OUT_OF_MEMORY;
++        free(hostaddr);
++        hostaddr = NULL;
++      }
++    }
++    else
++#endif
+     if(!conn->proxy.name || !*conn->proxy.name) {
+       /* If not connecting via a proxy, extract the port from the URL, if it is
+        * there, thus overriding any defaults that might have been set above. */
+@@ -5071,6 +5108,13 @@ static CURLcode create_conn(struct SessionHandle *data,
+   else if(!proxy)
+     proxy = detect_proxy(conn);
+ 
++#ifdef USE_UNIX_SOCKETS
++  if(proxy && data->set.str[STRING_UNIX_SOCKET_PATH]) {
++    free(proxy);  /* UNIX domain sockets cannot be proxied, so disable it */
++    proxy = NULL;
++  }
++#endif
++
+   if(proxy && (!*proxy || (conn->handler->flags & PROTOPT_NONETWORK))) {
+     free(proxy);  /* Don't bother with an empty proxy string or if the
+                      protocol doesn't work with network */
+diff --git a/lib/urldata.h b/lib/urldata.h
+index b3ee7e3..723e40d 100644
+--- a/lib/urldata.h
++++ b/lib/urldata.h
+@@ -1375,6 +1375,10 @@ enum dupstring {
+   STRING_TLSAUTH_PASSWORD,     /* TLS auth <password> */
+ #endif
+ 
++#ifdef USE_UNIX_SOCKETS
++  STRING_UNIX_SOCKET_PATH,  /* path to UNIX socket, if used */
++#endif
++
+   /* -- end of zero-terminated strings -- */
+ 
+   STRING_LASTZEROTERMINATED,
+diff --git a/lib/version.c b/lib/version.c
+index d39fe0c..e798738 100644
+--- a/lib/version.c
++++ b/lib/version.c
+@@ -278,6 +278,9 @@ static curl_version_info_data version_info = {
+ #if defined(USE_TLS_SRP)
+   | CURL_VERSION_TLSAUTH_SRP
+ #endif
++#if defined(USE_UNIX_SOCKETS)
++  | CURL_VERSION_UNIX_SOCKETS
++#endif
+   ,
+   NULL, /* ssl_version */
+   0,    /* ssl_version_num, this is kept at zero */
+diff --git a/src/Makefile.in b/src/Makefile.in
+index 5f739a9..948092f 100644
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -272,6 +272,7 @@ USE_OPENLDAP = @USE_OPENLDAP@
+ USE_POLARSSL = @USE_POLARSSL@
+ USE_SCHANNEL = @USE_SCHANNEL@
+ USE_SSLEAY = @USE_SSLEAY@
++USE_UNIX_SOCKETS = @USE_UNIX_SOCKETS@
+ USE_WINDOWS_SSPI = @USE_WINDOWS_SSPI@
+ VERSION = @VERSION@
+ VERSIONED_FLAVOUR = @VERSIONED_FLAVOUR@
+diff --git a/src/tool_getparam.c b/src/tool_getparam.c
+index 98d53a7..0cd84d5 100644
+--- a/src/tool_getparam.c
++++ b/src/tool_getparam.c
+@@ -285,7 +285,8 @@ static const struct feat feats[] = {
+   {"krb4",           CURL_VERSION_KERBEROS4},
+   {"libz",           CURL_VERSION_LIBZ},
+   {"CharConv",       CURL_VERSION_CONV},
+-  {"TLS-SRP",        CURL_VERSION_TLSAUTH_SRP}
++  {"TLS-SRP",        CURL_VERSION_TLSAUTH_SRP},
++  {"unix-sockets",   CURL_VERSION_UNIX_SOCKETS}
+ };
+ 
+ ParameterError getparameter(char *flag,    /* f or -long-flag */
+diff --git a/tests/server/Makefile.in b/tests/server/Makefile.in
+index 0ca4380..055fe9b 100644
+--- a/tests/server/Makefile.in
++++ b/tests/server/Makefile.in
+@@ -329,6 +329,7 @@ USE_OPENLDAP = @USE_OPENLDAP@
+ USE_POLARSSL = @USE_POLARSSL@
+ USE_SCHANNEL = @USE_SCHANNEL@
+ USE_SSLEAY = @USE_SSLEAY@
++USE_UNIX_SOCKETS = @USE_UNIX_SOCKETS@
+ USE_WINDOWS_SSPI = @USE_WINDOWS_SSPI@
+ VERSION = @VERSION@
+ VERSIONED_FLAVOUR = @VERSIONED_FLAVOUR@
+-- 
+2.5.2
+
+
+From 877e40cd741b5b65f503236a6947e38c28a2d6ce Mon Sep 17 00:00:00 2001
+From: Peter Wu <peter@lekensteyn.nl>
+Date: Thu, 27 Nov 2014 23:59:26 +0100
+Subject: [PATCH 08/11] tool: add --unix-socket option
+
+Signed-off-by: Peter Wu <peter@lekensteyn.nl>
+
+Upstream-commit: c8644d1f638fdd8f4bf34fe64e910ba704fb26c0
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ src/tool_cfgable.c  | 1 +
+ src/tool_cfgable.h  | 2 ++
+ src/tool_getparam.c | 6 +++++-
+ src/tool_help.c     | 1 +
+ src/tool_operate.c  | 4 ++++
+ 5 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/src/tool_cfgable.c b/src/tool_cfgable.c
+index da11f4a..2479b73 100644
+--- a/src/tool_cfgable.c
++++ b/src/tool_cfgable.c
+@@ -98,6 +98,7 @@ void free_config_fields(struct Configurable *config)
+ 
+   config->trace_stream = NULL; /* closed elsewhere when appropriate */
+ 
++  Curl_safefree(config->unix_socket_path);
+   Curl_safefree(config->writeout);
+ 
+   config->errors = NULL; /* closed elsewhere when appropriate */
+diff --git a/src/tool_cfgable.h b/src/tool_cfgable.h
+index 1f6f948..a9b033b 100644
+--- a/src/tool_cfgable.h
++++ b/src/tool_cfgable.h
+@@ -204,6 +204,8 @@ struct Configurable {
+   bool use_metalink;        /* process given URLs as metalink XML file */
+   metalinkfile *metalinkfile_list; /* point to the first node */
+   metalinkfile *metalinkfile_last; /* point to the last/current node */
++
++  char *unix_socket_path;   /* path to UNIX domain socket */
+ }; /* struct Configurable */
+ 
+ void free_config_fields(struct Configurable *config);
+diff --git a/src/tool_getparam.c b/src/tool_getparam.c
+index 0cd84d5..57cf97d 100644
+--- a/src/tool_getparam.c
++++ b/src/tool_getparam.c
+@@ -144,7 +144,7 @@ static const struct LongShort aliases[]= {
+   {"$v", "ssl-reqd",                 FALSE},
+          /* 'ssl-reqd' new in 7.20.0, previously this was ftp-ssl-reqd */
+   {"$w", "sessionid",                FALSE},
+-         /* ¡sessionid' listed as --no-sessionid in the help */
++         /* ?sessionid' listed as --no-sessionid in the help */
+   {"$x", "ftp-ssl-control",          FALSE},
+   {"$y", "ftp-ssl-ccc",              FALSE},
+   {"$j", "ftp-ssl-ccc-mode",         TRUE},
+@@ -173,6 +173,7 @@ static const struct LongShort aliases[]= {
+   {"$H", "mail-auth",                TRUE},
+   {"$I", "post303",                  FALSE},
+   {"$J", "metalink",                 FALSE},
++  {"$M", "unix-socket",              TRUE},
+   {"0",  "http1.0",                  FALSE},
+   {"1",  "tlsv1",                    FALSE},
+   {"10",  "tlsv1.0",                 FALSE},
+@@ -862,6 +863,9 @@ ParameterError getparameter(char *flag,    /* f or -long-flag */
+ #endif
+           break;
+         }
++      case 'M': /* --unix-socket */
++        GetStr(&config->unix_socket_path, nextarg);
++        break;
+       }
+       break;
+     case '#': /* --progress-bar */
+diff --git a/src/tool_help.c b/src/tool_help.c
+index f7cd618..3a64e35 100644
+--- a/src/tool_help.c
++++ b/src/tool_help.c
+@@ -214,6 +214,7 @@ static const char *const helptext[] = {
+   "     --tlsuser USER  TLS username",
+   "     --tlspassword STRING TLS password",
+   "     --tlsauthtype STRING  TLS authentication type (default SRP)",
++  "     --unix-socket FILE    Connect through this UNIX domain socket",
+   " -A, --user-agent STRING  User-Agent to send to server (H)",
+   " -v, --verbose       Make the operation more talkative",
+   " -V, --version       Show version number and quit",
+diff --git a/src/tool_operate.c b/src/tool_operate.c
+index 4166fc2..7a13fcf 100644
+--- a/src/tool_operate.c
++++ b/src/tool_operate.c
+@@ -1320,6 +1320,10 @@ int operate(struct Configurable *config, int argc, argv_item_t argv[])
+         if(config->mail_auth)
+           my_setopt_str(curl, CURLOPT_MAIL_AUTH, config->mail_auth);
+ 
++        /* new in 7.40.0 */
++        if(config->unix_socket_path)
++          my_setopt(curl, CURLOPT_UNIX_SOCKET_PATH, config->unix_socket_path);
++
+         /* initialize retry vars for loop below */
+         retry_sleep_default = (config->retry_delay) ?
+           config->retry_delay*1000L : RETRY_SLEEP_DEFAULT; /* ms */
+-- 
+2.5.2
+
+
+From 60bdcf03a1696b3d09ad1c04824816766c513dcd Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Wed, 3 Dec 2014 02:35:12 +0100
+Subject: [PATCH 09/11] curl.1: added --unix-socket
+
+Upstream-commit: 7853c1cfe6fc7828afbb812791a383781aca3be3
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/curl.1 | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/docs/curl.1 b/docs/curl.1
+index 7f3571b..38fa084 100644
+--- a/docs/curl.1
++++ b/docs/curl.1
+@@ -1471,6 +1471,9 @@ If this option is used several times, the last one will be used.
+ .IP "--trace-time"
+ Prepends a time stamp to each trace or verbose line that curl displays.
+ (Added in 7.14.0)
++.IP "--unix-socket <path>"
++(HTTP) Connect through this UNIX domain socket, instead of using the
++network. (Added in 7.40.0)
+ .IP "-u, --user <user:password>"
+ Specify the user name and password to use for server authentication. Overrides
+ \fI-n, --netrc\fP and \fI--netrc-optional\fP.
+-- 
+2.5.2
+
+
+From af6fa1e00657c637d52cc24eab6d769b8eb793a9 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Thu, 4 Dec 2014 02:46:15 +0100
+Subject: [PATCH 10/11] updateconninfo: clear destination struct before
+ getsockname()
+
+Otherwise we may read uninitialized bytes later in the unix-domain
+sockets case.
+
+Upstream-commit: 9730c9fb7075792a112b65a023379fad3ec8dda4
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/connect.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/lib/connect.c b/lib/connect.c
+index ba9ab92..5aa53fe 100644
+--- a/lib/connect.c
++++ b/lib/connect.c
+@@ -630,6 +630,7 @@ void Curl_updateconninfo(struct connectdata *conn, curl_socket_t sockfd)
+     }
+ 
+     len = sizeof(struct Curl_sockaddr_storage);
++    memset(&ssloc, 0, sizeof(ssloc));
+     if(getsockname(sockfd, (struct sockaddr*) &ssloc, &len)) {
+       error = SOCKERRNO;
+       failf(data, "getsockname() failed with errno %d: %s",
+-- 
+2.5.2
+
+
+From 8d951bb327fb6a1e107e044dbc179096883c4489 Mon Sep 17 00:00:00 2001
+From: Peter Wu <peter@lekensteyn.nl>
+Date: Thu, 4 Dec 2014 11:01:41 -0800
+Subject: [PATCH 11/11] tool: fix CURLOPT_UNIX_SOCKET_PATH in --libcurl output
+
+Mark CURLOPT_UNIX_SOCKET_PATH as string to ensure that it ends up as
+option in the file generated by --libcurl.
+
+Signed-off-by: Peter Wu <peter@lekensteyn.nl>
+
+Upstream-commit: 2e557de09431854e4ad137cd741a582caa917517
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ src/tool_operate.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/tool_operate.c b/src/tool_operate.c
+index 7a13fcf..41b0e6b 100644
+--- a/src/tool_operate.c
++++ b/src/tool_operate.c
+@@ -1322,7 +1322,8 @@ int operate(struct Configurable *config, int argc, argv_item_t argv[])
+ 
+         /* new in 7.40.0 */
+         if(config->unix_socket_path)
+-          my_setopt(curl, CURLOPT_UNIX_SOCKET_PATH, config->unix_socket_path);
++          my_setopt_str(curl, CURLOPT_UNIX_SOCKET_PATH,
++                        config->unix_socket_path);
+ 
+         /* initialize retry vars for loop below */
+         retry_sleep_default = (config->retry_delay) ?
+-- 
+2.5.2
+

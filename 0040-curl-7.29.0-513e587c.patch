@@ -1,0 +1,218 @@
+From 070718b3e00d0341d44dd5ad4b48fd4468d047c6 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Sat, 9 Mar 2013 22:26:07 +0100
+Subject: [PATCH 1/3] curl_multi_wait: avoid second loop if nothing to do
+
+... hopefully this will also make clang-analyzer stop warning on
+potentional NULL dereferences (which were false positives anyway).
+
+Upstream-commit: 136a3a0ee25f28fec1dde216467389f9e6e4f65c
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/multi.c | 55 ++++++++++++++++++++++++++++++++-----------------------
+ 1 file changed, 32 insertions(+), 23 deletions(-)
+
+diff --git a/lib/multi.c b/lib/multi.c
+index 6dfce9b..1136849 100644
+--- a/lib/multi.c
++++ b/lib/multi.c
+@@ -804,7 +804,8 @@ CURLMcode curl_multi_wait(CURLM *multi_handle,
+   curl_socket_t sockbunch[MAX_SOCKSPEREASYHANDLE];
+   int bitmap;
+   unsigned int i;
+-  unsigned int nfds = extra_nfds;
++  unsigned int nfds = 0;
++  unsigned int curlfds;
+   struct pollfd *ufds = NULL;
+   long timeout_internal;
+ 
+@@ -842,6 +843,9 @@ CURLMcode curl_multi_wait(CURLM *multi_handle,
+     easy = easy->next; /* check next handle */
+   }
+ 
++  curlfds = nfds; /* number of internal file descriptors */
++  nfds += extra_nfds; /* add the externally provided ones */
++
+   if(nfds) {
+     ufds = malloc(nfds * sizeof(struct pollfd));
+     if(!ufds)
+@@ -849,32 +853,37 @@ CURLMcode curl_multi_wait(CURLM *multi_handle,
+   }
+   nfds = 0;
+ 
+-  /* Add the curl handles to our pollfds first */
+-  easy=multi->easy.next;
+-  while(easy != &multi->easy) {
+-    bitmap = multi_getsock(easy, sockbunch, MAX_SOCKSPEREASYHANDLE);
++  /* only do the second loop if we found descriptors in the first stage run
++     above */
+ 
+-    for(i=0; i< MAX_SOCKSPEREASYHANDLE; i++) {
+-      curl_socket_t s = CURL_SOCKET_BAD;
++  if(curlfds) {
++    /* Add the curl handles to our pollfds first */
++    easy=multi->easy.next;
++    while(easy != &multi->easy) {
++      bitmap = multi_getsock(easy, sockbunch, MAX_SOCKSPEREASYHANDLE);
+ 
+-      if(bitmap & GETSOCK_READSOCK(i)) {
+-        ufds[nfds].fd = sockbunch[i];
+-        ufds[nfds].events = POLLIN;
+-        ++nfds;
+-        s = sockbunch[i];
+-      }
+-      if(bitmap & GETSOCK_WRITESOCK(i)) {
+-        ufds[nfds].fd = sockbunch[i];
+-        ufds[nfds].events = POLLOUT;
+-        ++nfds;
+-        s = sockbunch[i];
+-      }
+-      if(s == CURL_SOCKET_BAD) {
+-        break;
++      for(i=0; i< MAX_SOCKSPEREASYHANDLE; i++) {
++        curl_socket_t s = CURL_SOCKET_BAD;
++
++        if(bitmap & GETSOCK_READSOCK(i)) {
++          ufds[nfds].fd = sockbunch[i];
++          ufds[nfds].events = POLLIN;
++          ++nfds;
++          s = sockbunch[i];
++        }
++        if(bitmap & GETSOCK_WRITESOCK(i)) {
++          ufds[nfds].fd = sockbunch[i];
++          ufds[nfds].events = POLLOUT;
++          ++nfds;
++          s = sockbunch[i];
++        }
++        if(s == CURL_SOCKET_BAD) {
++          break;
++        }
+       }
+-    }
+ 
+-    easy = easy->next; /* check next handle */
++      easy = easy->next; /* check next handle */
++    }
+   }
+ 
+   /* Add external file descriptions from poll-like struct curl_waitfd */
+-- 
+2.5.5
+
+
+From f8b84a52088a99d8128c2234f626ed233beabeae Mon Sep 17 00:00:00 2001
+From: Evgeny Turnaev <turnaev.e@gmail.com>
+Date: Thu, 18 Jul 2013 00:06:09 +0200
+Subject: [PATCH 2/3] curl_multi_wait: set revents for extra fds
+
+Pass back the revents that happened for the user-provided file
+descriptors.
+
+Upstream-commit: 6d30f8ebed34e7276c2a59ee20d466bff17fee56
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/multi.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/lib/multi.c b/lib/multi.c
+index 1136849..81bcfba 100644
+--- a/lib/multi.c
++++ b/lib/multi.c
+@@ -803,7 +803,7 @@ CURLMcode curl_multi_wait(CURLM *multi_handle,
+   struct Curl_one_easy *easy;
+   curl_socket_t sockbunch[MAX_SOCKSPEREASYHANDLE];
+   int bitmap;
+-  unsigned int i;
++  unsigned int i, j;
+   unsigned int nfds = 0;
+   unsigned int curlfds;
+   struct pollfd *ufds = NULL;
+@@ -905,6 +905,9 @@ CURLMcode curl_multi_wait(CURLM *multi_handle,
+   else
+     i = 0;
+ 
++  for(j = nfds - extra_nfds; j < nfds; j++)
++    extra_fds[j].revents = ufds[j].revents;
++
+   Curl_safefree(ufds);
+   if(ret)
+     *ret = i;
+-- 
+2.5.5
+
+
+From db2e5b5ffe5408aa892dee9e7f036fe0ea16963d Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Thu, 18 Jul 2013 23:36:59 +0200
+Subject: [PATCH 3/3] curl_multi_wait: fix revents
+
+Commit 6d30f8ebed34e7276 didn't work properly. First, it used the wrong
+array index, but this fix also:
+
+1 - only does the copying if indeed there was any activity
+
+2 - makes sure to properly translate between internal and external
+bitfields, which are not guaranteed to match
+
+Reported-by: Evgeny Turnaev
+
+Upstream-commit: 513e587c5eb966038731530c8f47fe0cf27513ce
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/multi.c | 28 +++++++++++++++++++++++-----
+ 1 file changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/lib/multi.c b/lib/multi.c
+index 81bcfba..0e0bb19 100644
+--- a/lib/multi.c
++++ b/lib/multi.c
+@@ -803,7 +803,7 @@ CURLMcode curl_multi_wait(CURLM *multi_handle,
+   struct Curl_one_easy *easy;
+   curl_socket_t sockbunch[MAX_SOCKSPEREASYHANDLE];
+   int bitmap;
+-  unsigned int i, j;
++  unsigned int i;
+   unsigned int nfds = 0;
+   unsigned int curlfds;
+   struct pollfd *ufds = NULL;
+@@ -899,15 +899,33 @@ CURLMcode curl_multi_wait(CURLM *multi_handle,
+     ++nfds;
+   }
+ 
+-  if(nfds)
++  if(nfds) {
+     /* wait... */
+     i = Curl_poll(ufds, nfds, timeout_ms);
++
++    if(i) {
++      unsigned int j;
++      /* copy revents results from the poll to the curl_multi_wait poll
++         struct, the bit values of the actual underlying poll() implementation
++         may not be the same as the ones in the public libcurl API! */
++      for(j = 0; j < extra_nfds; j++) {
++        unsigned short mask = 0;
++        unsigned r = ufds[curlfds + j].revents;
++
++        if(r & POLLIN)
++          mask |= CURL_WAIT_POLLIN;
++        if(r & POLLOUT)
++          mask |= CURL_WAIT_POLLOUT;
++        if(r & POLLPRI)
++          mask |= CURL_WAIT_POLLPRI;
++
++        extra_fds[j].revents = mask;
++      }
++    }
++  }
+   else
+     i = 0;
+ 
+-  for(j = nfds - extra_nfds; j < nfds; j++)
+-    extra_fds[j].revents = ufds[j].revents;
+-
+   Curl_safefree(ufds);
+   if(ret)
+     *ret = i;
+-- 
+2.5.5
+

@@ -1,0 +1,59 @@
+From ac2121bf962ecc054dd103ccd42a93912051672e Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Tue, 21 Jun 2016 12:40:26 +0200
+Subject: [PATCH] curl-compilers.m4: improve detection of GCC's -fvisibility=
+ flag
+
+Some builds of GCC produce output on both stdout and stderr when --help
+--verbose is used.  The 2>&1 redirection caused them to be arbitrarily
+interleaved with each other because of stream buffering.  Consequently,
+grep failed to match the fvisibility= string in the mixed output, even
+though the string was present in GCC's standard output.
+
+This led to silently disabling symbol hiding in some builds of curl.
+
+Upstream-commit: b2dcf0347f1ee5041cccd64632bb8dd7ccbbae91
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ configure            | 2 +-
+ m4/curl-compilers.m4 | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/configure b/configure
+index 4797e02..fc260ee 100755
+--- a/configure
++++ b/configure
+@@ -17636,7 +17636,7 @@ $as_echo_n "checking if compiler supports hiding library internal symbols... " >
+       ;;
+     GNU_C)
+             if test "$compiler_num" -ge "304"; then
+-        if $CC --help --verbose 2>&1 | grep fvisibility= > /dev/null ; then
++        if $CC --help --verbose 2>/dev/null | grep fvisibility= >/dev/null ; then
+           tmp_EXTERN="__attribute__ ((__visibility__ (\"default\")))"
+           tmp_CFLAGS="-fvisibility=hidden"
+           supports_symbol_hiding="yes"
+diff --git a/m4/curl-compilers.m4 b/m4/curl-compilers.m4
+index ca064dd..77371de 100644
+--- a/m4/curl-compilers.m4
++++ b/m4/curl-compilers.m4
+@@ -21,7 +21,7 @@
+ #***************************************************************************
+ 
+ # File version for 'aclocal' use. Keep it a single number.
+-# serial 65
++# serial 66
+ 
+ 
+ dnl CURL_CHECK_COMPILER
+@@ -1391,7 +1391,7 @@ AC_DEFUN([CURL_CHECK_COMPILER_SYMBOL_HIDING], [
+     GNU_C)
+       dnl Only gcc 3.4 or later
+       if test "$compiler_num" -ge "304"; then
+-        if $CC --help --verbose 2>&1 | grep fvisibility= > /dev/null ; then
++        if $CC --help --verbose 2>/dev/null | grep fvisibility= >/dev/null ; then
+           tmp_EXTERN="__attribute__ ((__visibility__ (\"default\")))"
+           tmp_CFLAGS="-fvisibility=hidden"
+           supports_symbol_hiding="yes"
+-- 
+2.5.5
+

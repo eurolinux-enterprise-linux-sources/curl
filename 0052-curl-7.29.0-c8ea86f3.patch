@@ -1,0 +1,42 @@
+From 67fdfef9a786fdd08da5456fca6fb30ff0d27be0 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Mon, 24 Apr 2017 15:01:04 +0200
+Subject: [PATCH] nss: do not leak PKCS #11 slot while loading a key
+
+It could prevent nss-pem from being unloaded later on.
+
+Bug: https://bugzilla.redhat.com/1444860
+
+Upstream-commit: c8ea86f377a2f341db635ec96f99314023b5a8f3
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/nss.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/lib/nss.c b/lib/nss.c
+index b73a1e8..86775b4 100644
+--- a/lib/nss.c
++++ b/lib/nss.c
+@@ -551,7 +551,7 @@ fail:
+ static CURLcode nss_load_key(struct connectdata *conn, int sockindex,
+                              char *key_file)
+ {
+-  PK11SlotInfo *slot;
++  PK11SlotInfo *slot, *tmp;
+   SECStatus status;
+   CURLcode rv;
+   struct ssl_connect_data *ssl = conn->ssl;
+@@ -568,7 +568,9 @@ static CURLcode nss_load_key(struct connectdata *conn, int sockindex,
+     return CURLE_SSL_CERTPROBLEM;
+ 
+   /* This will force the token to be seen as re-inserted */
+-  SECMOD_WaitForAnyTokenEvent(mod, 0, 0);
++  tmp = SECMOD_WaitForAnyTokenEvent(mod, 0, 0);
++  if(tmp)
++    PK11_FreeSlot(tmp);
+   PK11_IsPresent(slot);
+ 
+   status = PK11_Authenticate(slot, PR_TRUE,
+-- 
+2.13.5
+

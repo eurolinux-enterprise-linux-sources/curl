@@ -1,0 +1,849 @@
+From bf2eb071494dd48bf1730ce2bc7d21a8fd13b5c8 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Sat, 26 Oct 2013 20:19:27 +0200
+Subject: [PATCH 1/7] FTP: make the data connection work when going through
+ proxy
+
+This is a regression since the switch to always-multi internally
+c43127414d89c.
+
+Upstream-commit: d44b0142714041b784ffd10792318674ecb1ed56
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/connect.c |   2 +-
+ lib/ftp.c     | 183 +++++++++++++++++++++++++++++++---------------------------
+ lib/ftp.h     |   6 ++
+ lib/socks.c   |   4 ++
+ lib/url.c     |   9 ++-
+ lib/url.h     |   2 +-
+ 6 files changed, 117 insertions(+), 89 deletions(-)
+
+diff --git a/lib/connect.c b/lib/connect.c
+index 5aa53fe..78627e6 100644
+--- a/lib/connect.c
++++ b/lib/connect.c
+@@ -715,7 +715,7 @@ CURLcode Curl_is_connected(struct connectdata *conn,
+       /* we are connected with TCP, awesome! */
+ 
+       /* see if we need to do any proxy magic first once we connected */
+-      code = Curl_connected_proxy(conn);
++      code = Curl_connected_proxy(conn, sockindex);
+       if(code)
+         return code;
+ 
+diff --git a/lib/ftp.c b/lib/ftp.c
+index 63d1e64..b9fa12e 100644
+--- a/lib/ftp.c
++++ b/lib/ftp.c
+@@ -1800,6 +1800,79 @@ static CURLcode ftp_epsv_disable(struct connectdata *conn)
+   return result;
+ }
+ 
++/*
++ * Perform the necessary magic that needs to be done once the TCP connection
++ * to the proxy has completed.
++ */
++static CURLcode proxy_magic(struct connectdata *conn,
++                            char *newhost, unsigned short newport,
++                            bool *magicdone)
++{
++  struct SessionHandle *data=conn->data;
++  CURLcode result;
++
++  *magicdone = FALSE;
++  switch(conn->proxytype) {
++  case CURLPROXY_SOCKS5:
++  case CURLPROXY_SOCKS5_HOSTNAME:
++    result = Curl_SOCKS5(conn->proxyuser, conn->proxypasswd, newhost,
++                         newport, SECONDARYSOCKET, conn);
++    *magicdone = TRUE;
++    break;
++  case CURLPROXY_SOCKS4:
++    result = Curl_SOCKS4(conn->proxyuser, newhost, newport,
++                         SECONDARYSOCKET, conn, FALSE);
++    *magicdone = TRUE;
++    break;
++  case CURLPROXY_SOCKS4A:
++    result = Curl_SOCKS4(conn->proxyuser, newhost, newport,
++                         SECONDARYSOCKET, conn, TRUE);
++    *magicdone = TRUE;
++    break;
++  case CURLPROXY_HTTP:
++  case CURLPROXY_HTTP_1_0:
++    /* do nothing here. handled later. */
++    break;
++  default:
++    failf(data, "unknown proxytype option given");
++    result = CURLE_COULDNT_CONNECT;
++    break;
++  }
++
++  if(conn->bits.tunnel_proxy && conn->bits.httpproxy) {
++    /* BLOCKING */
++    /* We want "seamless" FTP operations through HTTP proxy tunnel */
++
++    /* Curl_proxyCONNECT is based on a pointer to a struct HTTP at the
++     * member conn->proto.http; we want FTP through HTTP and we have to
++     * change the member temporarily for connecting to the HTTP proxy. After
++     * Curl_proxyCONNECT we have to set back the member to the original
++     * struct FTP pointer
++     */
++    struct HTTP http_proxy;
++    struct FTP *ftp_save = data->state.proto.ftp;
++    memset(&http_proxy, 0, sizeof(http_proxy));
++    data->state.proto.http = &http_proxy;
++
++    result = Curl_proxyCONNECT(conn, SECONDARYSOCKET, newhost, newport);
++
++    data->state.proto.ftp = ftp_save;
++
++    if(result)
++      return result;
++
++    if(conn->tunnel_state[SECONDARYSOCKET] != TUNNEL_COMPLETE) {
++      /* the CONNECT procedure is not complete, the tunnel is not yet up */
++      state(conn, FTP_STOP); /* this phase is completed */
++      conn->bits.tcpconnect[SECONDARYSOCKET] = FALSE;
++      return result;
++    }
++    else
++      *magicdone = TRUE;
++  }
++  return result;
++}
++
+ static CURLcode ftp_state_pasv_resp(struct connectdata *conn,
+                                     int ftpcode)
+ {
+@@ -1810,13 +1883,7 @@ static CURLcode ftp_state_pasv_resp(struct connectdata *conn,
+   struct Curl_dns_entry *addr=NULL;
+   int rc;
+   unsigned short connectport; /* the local port connect() should use! */
+-  unsigned short newport=0; /* remote port */
+   bool connected;
+-
+-  /* newhost must be able to hold a full IP-style address in ASCII, which
+-     in the IPv6 case means 5*8-1 = 39 letters */
+-#define NEWHOST_BUFSIZE 48
+-  char newhost[NEWHOST_BUFSIZE];
+   char *str=&data->state.buffer[4];  /* start on the first letter */
+ 
+   if((ftpc->count1 == 0) &&
+@@ -1849,7 +1916,7 @@ static CURLcode ftp_state_pasv_resp(struct connectdata *conn,
+           return CURLE_FTP_WEIRD_PASV_REPLY;
+         }
+         if(ptr) {
+-          newport = (unsigned short)(num & 0xffff);
++          ftpc->newport = (unsigned short)(num & 0xffff);
+ 
+           if(conn->bits.tunnel_proxy ||
+              conn->proxytype == CURLPROXY_SOCKS5 ||
+@@ -1858,10 +1925,11 @@ static CURLcode ftp_state_pasv_resp(struct connectdata *conn,
+              conn->proxytype == CURLPROXY_SOCKS4A)
+             /* proxy tunnel -> use other host info because ip_addr_str is the
+                proxy address not the ftp host */
+-            snprintf(newhost, sizeof(newhost), "%s", conn->host.name);
++            snprintf(ftpc->newhost, sizeof(ftpc->newhost), "%s",
++                     conn->host.name);
+           else
+             /* use the same IP we are already connected to */
+-            snprintf(newhost, NEWHOST_BUFSIZE, "%s", conn->ip_addr_str);
++            snprintf(ftpc->newhost, NEWHOST_BUFSIZE, "%s", conn->ip_addr_str);
+         }
+       }
+       else
+@@ -1914,14 +1982,15 @@ static CURLcode ftp_state_pasv_resp(struct connectdata *conn,
+          conn->proxytype == CURLPROXY_SOCKS4A)
+         /* proxy tunnel -> use other host info because ip_addr_str is the
+            proxy address not the ftp host */
+-        snprintf(newhost, sizeof(newhost), "%s", conn->host.name);
++        snprintf(ftpc->newhost, sizeof(ftpc->newhost), "%s", conn->host.name);
+       else
+-        snprintf(newhost, sizeof(newhost), "%s", conn->ip_addr_str);
++        snprintf(ftpc->newhost, sizeof(ftpc->newhost), "%s",
++                 conn->ip_addr_str);
+     }
+     else
+-      snprintf(newhost, sizeof(newhost),
++      snprintf(ftpc->newhost, sizeof(ftpc->newhost),
+                "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+-    newport = (unsigned short)(((port[0]<<8) + port[1]) & 0xffff);
++    ftpc->newport = (unsigned short)(((port[0]<<8) + port[1]) & 0xffff);
+   }
+   else if(ftpc->count1 == 0) {
+     /* EPSV failed, move on to PASV */
+@@ -1957,15 +2026,15 @@ static CURLcode ftp_state_pasv_resp(struct connectdata *conn,
+   }
+   else {
+     /* normal, direct, ftp connection */
+-    rc = Curl_resolv(conn, newhost, newport, &addr);
++    rc = Curl_resolv(conn, ftpc->newhost, ftpc->newport, &addr);
+     if(rc == CURLRESOLV_PENDING)
+       /* BLOCKING */
+       (void)Curl_resolver_wait_resolv(conn, &addr);
+ 
+-    connectport = newport; /* we connect to the remote port */
++    connectport = ftpc->newport; /* we connect to the remote port */
+ 
+     if(!addr) {
+-      failf(data, "Can't resolve new host %s:%hu", newhost, connectport);
++      failf(data, "Can't resolve new host %s:%hu", ftpc->newhost, connectport);
+       return CURLE_FTP_CANT_GET_HOST;
+     }
+   }
+@@ -1990,80 +2059,20 @@ static CURLcode ftp_state_pasv_resp(struct connectdata *conn,
+   /*
+    * When this is used from the multi interface, this might've returned with
+    * the 'connected' set to FALSE and thus we are now awaiting a non-blocking
+-   * connect to connect and we should not be "hanging" here waiting.
++   * connect to connect.
+    */
+ 
+   if(data->set.verbose)
+     /* this just dumps information about this second connection */
+-    ftp_pasv_verbose(conn, conninfo, newhost, connectport);
+-
+-  switch(conn->proxytype) {
+-    /* FIX: this MUST wait for a proper connect first if 'connected' is
+-     * FALSE */
+-  case CURLPROXY_SOCKS5:
+-  case CURLPROXY_SOCKS5_HOSTNAME:
+-    result = Curl_SOCKS5(conn->proxyuser, conn->proxypasswd, newhost, newport,
+-                         SECONDARYSOCKET, conn);
+-    connected = TRUE;
+-    break;
+-  case CURLPROXY_SOCKS4:
+-    result = Curl_SOCKS4(conn->proxyuser, newhost, newport,
+-                         SECONDARYSOCKET, conn, FALSE);
+-    connected = TRUE;
+-    break;
+-  case CURLPROXY_SOCKS4A:
+-    result = Curl_SOCKS4(conn->proxyuser, newhost, newport,
+-                         SECONDARYSOCKET, conn, TRUE);
+-    connected = TRUE;
+-    break;
+-  case CURLPROXY_HTTP:
+-  case CURLPROXY_HTTP_1_0:
+-    /* do nothing here. handled later. */
+-    break;
+-  default:
+-    failf(data, "unknown proxytype option given");
+-    result = CURLE_COULDNT_CONNECT;
+-    break;
+-  }
+-
+-  if(result) {
+-    if(ftpc->count1 == 0 && ftpcode == 229)
+-      return ftp_epsv_disable(conn);
+-    return result;
+-  }
+-
+-  if(conn->bits.tunnel_proxy && conn->bits.httpproxy) {
+-    /* FIX: this MUST wait for a proper connect first if 'connected' is
+-     * FALSE */
+-
+-    /* BLOCKING */
+-    /* We want "seamless" FTP operations through HTTP proxy tunnel */
+-
+-    /* Curl_proxyCONNECT is based on a pointer to a struct HTTP at the member
+-     * conn->proto.http; we want FTP through HTTP and we have to change the
+-     * member temporarily for connecting to the HTTP proxy. After
+-     * Curl_proxyCONNECT we have to set back the member to the original struct
+-     * FTP pointer
+-     */
+-    struct HTTP http_proxy;
+-    struct FTP *ftp_save = data->state.proto.ftp;
+-    memset(&http_proxy, 0, sizeof(http_proxy));
+-    data->state.proto.http = &http_proxy;
+-
+-    result = Curl_proxyCONNECT(conn, SECONDARYSOCKET, newhost, newport);
++    ftp_pasv_verbose(conn, conninfo, ftpc->newhost, connectport);
+ 
+-    data->state.proto.ftp = ftp_save;
+-
+-    if(result)
+-      return result;
+-
+-    if(conn->tunnel_state[SECONDARYSOCKET] != TUNNEL_COMPLETE) {
+-      /* the CONNECT procedure is not complete, the tunnel is not yet up */
+-      state(conn, FTP_STOP); /* this phase is completed */
+-      conn->bits.tcpconnect[SECONDARYSOCKET] = FALSE;
+-
+-      return result;
+-    }
++  if(connected) {
++    /* Only do the proxy connection magic if we're actually connected.  We do
++       this little trick and send in the same 'connected' variable here again
++       and it will be set FALSE by proxy_magic() for when for example the
++       CONNECT procedure doesn't complete */
++    infof(data, "Connection to proxy confirmed almost instantly\n");
++    result = proxy_magic(conn, ftpc->newhost, ftpc->newport, &connected);
+   }
+ 
+   conn->bits.tcpconnect[SECONDARYSOCKET] = connected;
+@@ -3686,6 +3695,10 @@ static CURLcode ftp_do_more(struct connectdata *conn, int *completep)
+     /* Ready to do more? */
+     if(connected) {
+       DEBUGF(infof(data, "DO-MORE connected phase starts\n"));
++      if(conn->bits.proxy) {
++        infof(data, "Connection to proxy confirmed\n");
++        result = proxy_magic(conn, ftpc->newhost, ftpc->newport, &connected);
++      }
+     }
+     else {
+       if(result && (ftpc->count1 == 0)) {
+diff --git a/lib/ftp.h b/lib/ftp.h
+index d359f28..4b4a488 100644
+--- a/lib/ftp.h
++++ b/lib/ftp.h
+@@ -154,6 +154,12 @@ struct ftp_conn {
+   curl_off_t known_filesize; /* file size is different from -1, if wildcard
+                                 LIST parsing was done and wc_statemach set
+                                 it */
++  /* newhost must be able to hold a full IP-style address in ASCII, which
++     in the IPv6 case means 5*8-1 = 39 letters */
++#define NEWHOST_BUFSIZE 48
++  char newhost[NEWHOST_BUFSIZE]; /* this is the pair to connect the DATA... */
++  unsigned short newport;        /* connection to */
++
+ };
+ 
+ #define DEFAULT_ACCEPT_TIMEOUT   60000 /* milliseconds == one minute */
+diff --git a/lib/socks.c b/lib/socks.c
+index 51bb946..0cf397c 100644
+--- a/lib/socks.c
++++ b/lib/socks.c
+@@ -129,6 +129,8 @@ CURLcode Curl_SOCKS4(const char *proxy_name,
+ 
+   curlx_nonblock(sock, FALSE);
+ 
++  infof(data, "SOCKS4 communication to %s:%d\n", hostname, remote_port);
++
+   /*
+    * Compose socks4 request
+    *
+@@ -182,6 +184,8 @@ CURLcode Curl_SOCKS4(const char *proxy_name,
+       else
+         hp = NULL; /* fail! */
+ 
++      infof(data, "SOCKS4 connect to %s (locally resolved)\n", buf);
++
+       Curl_resolv_unlock(data, dns); /* not used anymore from now on */
+ 
+     }
+diff --git a/lib/url.c b/lib/url.c
+index cfc2744..11e0ff5 100644
+--- a/lib/url.c
++++ b/lib/url.c
+@@ -3103,8 +3103,13 @@ static CURLcode ConnectionStore(struct SessionHandle *data,
+    Note: this function's sub-functions call failf()
+ 
+ */
+-CURLcode Curl_connected_proxy(struct connectdata *conn)
++CURLcode Curl_connected_proxy(struct connectdata *conn, int sockindex)
+ {
++  if(!conn->bits.proxy || sockindex)
++    /* this magic only works for the primary socket as the secondary is used
++       for FTP only and it has FTP specific magic in ftp.c */
++    return CURLE_OK;
++
+   switch(conn->proxytype) {
+ #ifndef CURL_DISABLE_PROXY
+   case CURLPROXY_SOCKS5:
+@@ -3162,7 +3167,7 @@ static CURLcode ConnectPlease(struct SessionHandle *data,
+     conn->ip_addr = addr;
+ 
+     if(*connected) {
+-      result = Curl_connected_proxy(conn);
++      result = Curl_connected_proxy(conn, FIRSTSOCKET);
+       if(!result) {
+         conn->bits.tcpconnect[FIRSTSOCKET] = TRUE;
+         Curl_pgrsTime(data, TIMER_CONNECT); /* connect done */
+diff --git a/lib/url.h b/lib/url.h
+index c0d9c38..1da9be3 100644
+--- a/lib/url.h
++++ b/lib/url.h
+@@ -74,7 +74,7 @@ void Curl_reset_reqproto(struct connectdata *conn);
+ #define CURL_DEFAULT_SOCKS5_GSSAPI_SERVICE "rcmd" /* default socks5 gssapi
+                                                      service */
+ 
+-CURLcode Curl_connected_proxy(struct connectdata *conn);
++CURLcode Curl_connected_proxy(struct connectdata *conn, int sockindex);
+ 
+ #ifdef CURL_DISABLE_VERBOSE_STRINGS
+ #define Curl_verboseconnect(x)  Curl_nop_stmt
+-- 
+2.9.3
+
+
+From 4157798db51c859a1130203cebf377e77f56398a Mon Sep 17 00:00:00 2001
+From: Steve Holme <steve_holme@hotmail.com>
+Date: Sun, 27 Oct 2013 00:00:01 +0100
+Subject: [PATCH 2/7] ftp: Fixed compiler warning
+
+warning: 'result' may be used uninitialized in this function
+
+Upstream-commit: 9f503a254b0c720706124cb75922a0123f0079f0
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/ftp.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/ftp.c b/lib/ftp.c
+index b9fa12e..9c863b9 100644
+--- a/lib/ftp.c
++++ b/lib/ftp.c
+@@ -1808,8 +1808,8 @@ static CURLcode proxy_magic(struct connectdata *conn,
+                             char *newhost, unsigned short newport,
+                             bool *magicdone)
+ {
++  CURLcode result = CURLE_OK;
+   struct SessionHandle *data=conn->data;
+-  CURLcode result;
+ 
+   *magicdone = FALSE;
+   switch(conn->proxytype) {
+-- 
+2.9.3
+
+
+From 30566b76d17d9c5e13e3af621ecae0f4cafc3ac8 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Sat, 19 Jul 2014 23:58:58 +0200
+Subject: [PATCH 3/7] CONNECT: Revert Curl_proxyCONNECT back to 7.29.0 design
+
+This reverts commit cb3e6dfa3511 and instead fixes the problem
+differently.
+
+The reverted commit addressed a test failure in test 1021 by simplifying
+and generalizing the code flow in a way that damaged the
+performance. Now we modify the flow so that Curl_proxyCONNECT() again
+does as much as possible in one go, yet still do test 1021 with and
+without valgrind. It failed due to mistakes in the multi state machine.
+
+Bug: http://curl.haxx.se/bug/view.cgi?id=1397
+Reported-by: Paul Saab
+
+Upstream-commit: a4cece3d47cf092da00cf9910e87bb60b9eff533
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/http_proxy.c | 47 ++++++++++++++++++++++++++++++-----------------
+ lib/multi.c      | 16 ++++++++++------
+ 2 files changed, 40 insertions(+), 23 deletions(-)
+
+diff --git a/lib/http_proxy.c b/lib/http_proxy.c
+index c2eb667..d311b89 100644
+--- a/lib/http_proxy.c
++++ b/lib/http_proxy.c
+@@ -98,8 +98,6 @@ CURLcode Curl_proxyCONNECT(struct connectdata *conn,
+   struct SessionHandle *data=conn->data;
+   struct SingleRequest *k = &data->req;
+   CURLcode result;
+-  long timeout =
+-    data->set.timeout?data->set.timeout:PROXY_TIMEOUT; /* in milliseconds */
+   curl_socket_t tunnelsocket = conn->sock[sockindex];
+   curl_off_t cl=0;
+   bool closeConnection = FALSE;
+@@ -223,14 +221,25 @@ CURLcode Curl_proxyCONNECT(struct connectdata *conn,
+         return result;
+ 
+       conn->tunnel_state[sockindex] = TUNNEL_CONNECT;
++    } /* END CONNECT PHASE */
++
++    check = Curl_timeleft(data, NULL, TRUE);
++    if(check <= 0) {
++      failf(data, "Proxy CONNECT aborted due to timeout");
++      return CURLE_RECV_ERROR;
++    }
+ 
+-      /* now we've issued the CONNECT and we're waiting to hear back, return
+-         and get called again polling-style */
++    if(0 == Curl_socket_ready(tunnelsocket, CURL_SOCKET_BAD, 0))
++      /* return so we'll be called again polling-style */
+       return CURLE_OK;
++    else {
++      DEBUGF(infof(data,
++                   "Read response immediately from proxy CONNECT\n"));
++    }
+ 
+-    } /* END CONNECT PHASE */
++    /* at this point, the tunnel_connecting phase is over. */
+ 
+-    { /* BEGIN NEGOTIATION PHASE */
++    { /* READING RESPONSE PHASE */
+       size_t nread;   /* total size read */
+       int perline; /* count bytes per line */
+       int keepon=TRUE;
+@@ -247,9 +256,7 @@ CURLcode Curl_proxyCONNECT(struct connectdata *conn,
+ 
+       while((nread<BUFSIZE) && (keepon && !error)) {
+ 
+-        /* if timeout is requested, find out how much remaining time we have */
+-        check = timeout - /* timeout time */
+-          Curl_tvdiff(Curl_tvnow(), conn->now); /* spent time */
++        check = Curl_timeleft(data, NULL, TRUE);
+         if(check <= 0) {
+           failf(data, "Proxy CONNECT aborted due to timeout");
+           error = SELECT_TIMEOUT; /* already too little time */
+@@ -279,6 +286,7 @@ CURLcode Curl_proxyCONNECT(struct connectdata *conn,
+               /* proxy auth was requested and there was proxy auth available,
+                  then deem this as "mere" proxy disconnect */
+               conn->bits.proxy_connect_closed = TRUE;
++              infof(data, "Proxy CONNECT connection closed");
+             }
+             else {
+               error = SELECT_ERROR;
+@@ -519,7 +527,7 @@ CURLcode Curl_proxyCONNECT(struct connectdata *conn,
+         conn->sock[sockindex] = CURL_SOCKET_BAD;
+         break;
+       }
+-    } /* END NEGOTIATION PHASE */
++    } /* END READING RESPONSE PHASE */
+ 
+     /* If we are supposed to continue and request a new URL, which basically
+      * means the HTTP authentication is still going on so if the tunnel
+@@ -534,13 +542,11 @@ CURLcode Curl_proxyCONNECT(struct connectdata *conn,
+   } while(data->req.newurl);
+ 
+   if(200 != data->req.httpcode) {
+-    failf(data, "Received HTTP code %d from proxy after CONNECT",
+-          data->req.httpcode);
+-
+-    if(closeConnection && data->req.newurl)
++    if(closeConnection && data->req.newurl) {
+       conn->bits.proxy_connect_closed = TRUE;
+-
+-    if(data->req.newurl) {
++      infof(data, "Connect me again please\n");
++    }
++    else if(data->req.newurl) {
+       /* this won't be used anymore for the CONNECT so free it now */
+       free(data->req.newurl);
+       data->req.newurl = NULL;
+@@ -549,7 +555,14 @@ CURLcode Curl_proxyCONNECT(struct connectdata *conn,
+     /* to back to init state */
+     conn->tunnel_state[sockindex] = TUNNEL_INIT;
+ 
+-    return CURLE_RECV_ERROR;
++    if(conn->bits.proxy_connect_closed)
++      /* this is not an error, just part of the connection negotiation */
++      return CURLE_OK;
++    else {
++      failf(data, "Received HTTP code %d from proxy after CONNECT",
++            data->req.httpcode);
++      return CURLE_RECV_ERROR;
++    }
+   }
+ 
+   conn->tunnel_state[sockindex] = TUNNEL_COMPLETE;
+diff --git a/lib/multi.c b/lib/multi.c
+index 0e0bb19..3029fa6 100644
+--- a/lib/multi.c
++++ b/lib/multi.c
+@@ -1134,11 +1134,7 @@ static CURLMcode multi_runsingle(struct Curl_multi *multi,
+       easy->result = Curl_http_connect(easy->easy_conn, &protocol_connect);
+ 
+       if(easy->easy_conn->bits.proxy_connect_closed) {
+-        /* reset the error buffer */
+-        if(data->set.errorbuffer)
+-          data->set.errorbuffer[0] = '\0';
+-        data->state.errorbuf = FALSE;
+-
++        /* connect back to proxy again */
+         easy->result = CURLE_OK;
+         result = CURLM_CALL_MULTI_PERFORM;
+         multistate(easy, CURLM_STATE_CONNECT);
+@@ -1164,7 +1160,15 @@ static CURLMcode multi_runsingle(struct Curl_multi *multi,
+                                                &protocol_connect);
+       }
+ 
+-      if(CURLE_OK != easy->result) {
++      if(easy->easy_conn->bits.proxy_connect_closed) {
++        /* connect back to proxy again since it was closed in a proxy CONNECT
++           setup */
++        easy->result = CURLE_OK;
++        result = CURLM_CALL_MULTI_PERFORM;
++        multistate(easy, CURLM_STATE_CONNECT);
++        break;
++      }
++      else if(CURLE_OK != easy->result) {
+         /* failure detected */
+         /* Just break, the cleaning up is handled all in one place */
+         disconnect_conn = TRUE;
+-- 
+2.9.3
+
+
+From 6ab9346d63e88ddfb8fd3f509ad350cab24c37f4 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Wed, 17 Jun 2015 00:30:06 +0200
+Subject: [PATCH 4/7] FTP: do the HTTP CONNECT for data connection blocking
+
+** WORK-AROUND **
+
+The introduced non-blocking general behaviour for Curl_proxyCONNECT()
+didn't work for the data connection establishment unless it was very
+fast. The newly introduced function argument makes it operate in a more
+blocking manner, more like it used to work in the past. This blocking
+approach is only used when the FTP data connecting through HTTP proxy.
+
+Blocking like this is bad. A better fix would make it work more
+asynchronously.
+
+Bug: https://github.com/bagder/curl/issues/278
+
+Upstream-commit: b88f980a7437abc1159a1185c04d381347c8f5b1
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/ftp.c        |  4 ++--
+ lib/http_proxy.c | 22 ++++++++++++++--------
+ lib/http_proxy.h |  3 ++-
+ 3 files changed, 18 insertions(+), 11 deletions(-)
+
+diff --git a/lib/ftp.c b/lib/ftp.c
+index 63d1e64..db1e29e 100644
+--- a/lib/ftp.c
++++ b/lib/ftp.c
+@@ -1854,7 +1854,7 @@ static CURLcode proxy_magic(struct connectdata *conn,
+     memset(&http_proxy, 0, sizeof(http_proxy));
+     data->state.proto.http = &http_proxy;
+ 
+-    result = Curl_proxyCONNECT(conn, SECONDARYSOCKET, newhost, newport);
++    result = Curl_proxyCONNECT(conn, SECONDARYSOCKET, newhost, newport, TRUE);
+ 
+     data->state.proto.ftp = ftp_save;
+ 
+@@ -3685,7 +3685,7 @@ static CURLcode ftp_do_more(struct connectdata *conn, int *completep)
+     if(conn->tunnel_state[SECONDARYSOCKET] == TUNNEL_CONNECT) {
+       /* As we're in TUNNEL_CONNECT state now, we know the proxy name and port
+          aren't used so we blank their arguments. TODO: make this nicer */
+-      result = Curl_proxyCONNECT(conn, SECONDARYSOCKET, NULL, 0);
++      result = Curl_proxyCONNECT(conn, SECONDARYSOCKET, NULL, 0, FALSE);
+ 
+       return result;
+     }
+diff --git a/lib/http_proxy.c b/lib/http_proxy.c
+index d311b89..4ab280f 100644
+--- a/lib/http_proxy.c
++++ b/lib/http_proxy.c
+@@ -71,7 +71,7 @@ CURLcode Curl_proxy_connect(struct connectdata *conn)
+     conn->data->state.proto.http = &http_proxy;
+     conn->bits.close = FALSE;
+     result = Curl_proxyCONNECT(conn, FIRSTSOCKET,
+-                               conn->host.name, conn->remote_port);
++                               conn->host.name, conn->remote_port, FALSE);
+     conn->data->state.proto.generic = prot_save;
+     if(CURLE_OK != result)
+       return result;
+@@ -87,12 +87,16 @@ CURLcode Curl_proxy_connect(struct connectdata *conn)
+  * Curl_proxyCONNECT() requires that we're connected to a HTTP proxy. This
+  * function will issue the necessary commands to get a seamless tunnel through
+  * this proxy. After that, the socket can be used just as a normal socket.
++ *
++ * 'blocking' set to TRUE means that this function will do the entire CONNECT
++ * + response in a blocking fashion. Should be avoided!
+  */
+ 
+ CURLcode Curl_proxyCONNECT(struct connectdata *conn,
+                            int sockindex,
+                            const char *hostname,
+-                           unsigned short remote_port)
++                           unsigned short remote_port,
++                           bool blocking)
+ {
+   int subversion=0;
+   struct SessionHandle *data=conn->data;
+@@ -229,12 +233,14 @@ CURLcode Curl_proxyCONNECT(struct connectdata *conn,
+       return CURLE_RECV_ERROR;
+     }
+ 
+-    if(0 == Curl_socket_ready(tunnelsocket, CURL_SOCKET_BAD, 0))
+-      /* return so we'll be called again polling-style */
+-      return CURLE_OK;
+-    else {
+-      DEBUGF(infof(data,
+-                   "Read response immediately from proxy CONNECT\n"));
++    if(!blocking) {
++      if(0 == Curl_socket_ready(tunnelsocket, CURL_SOCKET_BAD, 0))
++        /* return so we'll be called again polling-style */
++        return CURLE_OK;
++      else {
++        DEBUGF(infof(data,
++               "Read response immediately from proxy CONNECT\n"));
++      }
+     }
+ 
+     /* at this point, the tunnel_connecting phase is over. */
+diff --git a/lib/http_proxy.h b/lib/http_proxy.h
+index 518c093..4dddc3b 100644
+--- a/lib/http_proxy.h
++++ b/lib/http_proxy.h
+@@ -26,7 +26,8 @@
+ /* ftp can use this as well */
+ CURLcode Curl_proxyCONNECT(struct connectdata *conn,
+                            int tunnelsocket,
+-                           const char *hostname, unsigned short remote_port);
++                           const char *hostname, unsigned short remote_port,
++                           bool blocking);
+ 
+ /* Default proxy timeout in milliseconds */
+ #define PROXY_TIMEOUT (3600*1000)
+-- 
+2.9.3
+
+
+From 7be64d4d3e1b966d491c6cde4fe3b6d69f03185b Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Thu, 9 Feb 2017 16:21:52 +0100
+Subject: [PATCH 5/7] nss: make FTPS work with --proxytunnel
+
+If the NSS code was in the middle of a non-blocking handshake and it
+was asked to finish the handshake in blocking mode, it unexpectedly
+continued in the non-blocking mode, which caused a FTPS connection
+over CONNECT to fail with "(81) Socket not ready for send/recv".
+
+Bug: https://bugzilla.redhat.com/1420327
+
+Upstream-commit: 8fa5409800668ad5305e7517597286014c7708fb
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/nss.c | 23 +++++++++++------------
+ 1 file changed, 11 insertions(+), 12 deletions(-)
+
+diff --git a/lib/nss.c b/lib/nss.c
+index 848ce86..cf45f3a 100644
+--- a/lib/nss.c
++++ b/lib/nss.c
+@@ -1305,13 +1305,14 @@ static CURLcode nss_fail_connect(struct ssl_connect_data *connssl,
+   return curlerr;
+ }
+ 
+-/* Switch the SSL socket into non-blocking mode. */
+-static CURLcode nss_set_nonblock(struct ssl_connect_data *connssl,
+-                                 struct SessionHandle *data)
++/* Switch the SSL socket into blocking or non-blocking mode. */
++static CURLcode nss_set_blocking(struct ssl_connect_data *connssl,
++                                 struct SessionHandle *data,
++                                 bool blocking)
+ {
+   static PRSocketOptionData sock_opt;
+   sock_opt.option = PR_SockOpt_Nonblocking;
+-  sock_opt.value.non_blocking = PR_TRUE;
++  sock_opt.value.non_blocking = !blocking;
+ 
+   if(PR_SetSocketOption(connssl->handle, &sock_opt) != PR_SUCCESS)
+     return nss_fail_connect(connssl, data, CURLE_SSL_CONNECT_ERROR);
+@@ -1615,16 +1616,14 @@ static CURLcode nss_connect_common(struct connectdata *conn, int sockindex,
+       /* we do not expect CURLE_AGAIN from nss_setup_connect() */
+       return rv;
+ 
+-    if(!blocking) {
+-      /* in non-blocking mode, set NSS non-blocking mode before handshake */
+-      rv = nss_set_nonblock(connssl, data);
+-      if(rv)
+-        return rv;
+-    }
+-
+     connssl->connecting_state = ssl_connect_2;
+   }
+ 
++  /* enable/disable blocking mode before handshake */
++  rv = nss_set_blocking(connssl, data, blocking);
++  if(rv)
++    return rv;
++
+   rv = nss_do_connect(conn, sockindex);
+   switch(rv) {
+   case CURLE_OK:
+@@ -1640,7 +1639,7 @@ static CURLcode nss_connect_common(struct connectdata *conn, int sockindex,
+ 
+   if(blocking) {
+     /* in blocking mode, set NSS non-blocking mode _after_ SSL handshake */
+-    rv = nss_set_nonblock(connssl, data);
++    rv = nss_set_blocking(connssl, data, /* blocking */ FALSE);
+     if(rv)
+       return rv;
+   }
+-- 
+2.7.4
+
+
+From 9dbd6550acdc143da0b044ae3b06368a87c8449a Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Mon, 27 Mar 2017 18:00:44 +0200
+Subject: [PATCH 6/7] url: plug memory leaks triggered by
+ curl-7_37_1-19-ga4cece3
+
+---
+ lib/url.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/lib/url.c b/lib/url.c
+index cfc2744..ed72be1 100644
+--- a/lib/url.c
++++ b/lib/url.c
+@@ -421,6 +421,7 @@ CURLcode Curl_close(struct SessionHandle *data)
+   data->state.path = NULL;
+ 
+   Curl_safefree(data->state.proto.generic);
++  Curl_safefree(data->req.newurl);
+ 
+   /* Close down all open SSL info and sessions */
+   Curl_ssl_close_all(data);
+@@ -3923,6 +3924,14 @@ static CURLcode setup_connection_internals(struct connectdata *conn)
+   const struct Curl_handler * p;
+   CURLcode result;
+ 
++  /* XXX: picked from curl-7_32_0-2-g4ad8e14 */
++  /* in some case in the multi state-machine, we go back to the CONNECT state
++     and then a second (or third or...) call to this function will be made
++     without doing a DISCONNECT or DONE in between (since the connection is
++     yet in place) and therefore this function needs to first make sure
++     there's no lingering previous data allocated. */
++  Curl_safefree(conn->data->req.newurl);
++
+   conn->socktype = SOCK_STREAM; /* most of them are TCP streams */
+ 
+   /* Scan protocol handler table. */
+-- 
+2.9.3
+
+
+From cfb58b02f5bb78a2f4b17f3bb6ce6acd196b3ec6 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Tue, 28 Mar 2017 15:50:59 +0200
+Subject: [PATCH 7/7] http: do not treat FTPS over CONNECT as HTTPS
+
+If we use FTPS over CONNECT, the TLS handshake for the FTPS control
+connection needs to be initiated in the SENDPROTOCONNECT state, not
+the WAITPROXYCONNECT state.  Otherwise, if the TLS handshake completed
+without blocking, the information about the completed TLS handshake
+would be saved to a wrong flag.  Consequently, the TLS handshake would
+be initiated in the SENDPROTOCONNECT state once again on the same
+connection, resulting in a failure of the TLS handshake.  I was able to
+observe the failure with the NSS backend if curl ran through valgrind.
+
+Note that this commit partially reverts curl-7_21_6-52-ge34131d.
+
+Upstream-commit: 2549831daaa3aef394f7b42e750cba1afae35642
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/http.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/http.c b/lib/http.c
+index 04beeb1..db37cf9 100644
+--- a/lib/http.c
++++ b/lib/http.c
+@@ -1310,7 +1310,7 @@ CURLcode Curl_http_connect(struct connectdata *conn, bool *done)
+     /* nothing else to do except wait right now - we're not done here. */
+     return CURLE_OK;
+ 
+-  if(conn->given->flags & PROTOPT_SSL) {
++  if(conn->given->protocol & CURLPROTO_HTTPS) {
+     /* perform SSL initialization */
+     result = https_connecting(conn, done);
+     if(result)
+-- 
+2.9.3
+

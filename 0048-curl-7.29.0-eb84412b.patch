@@ -1,0 +1,36 @@
+From 9a84abe8bd4951f8674e172acf1335d3be961d73 Mon Sep 17 00:00:00 2001
+From: Martin Frodl <mfrodl@redhat.com>
+Date: Mon, 24 Oct 2016 17:44:45 +0200
+Subject: [PATCH] nss: fix tight loop in non-blocking TLS handhsake over proxy
+
+... in case the handshake completes before entering
+CURLM_STATE_PROTOCONNECT
+
+Bug: https://bugzilla.redhat.com/1388162
+
+Upstream-commit: eb84412b33aa9cbe109d3e2874f9dbba48043263
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/nss.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/lib/nss.c b/lib/nss.c
+index 36c100d..848ce86 100644
+--- a/lib/nss.c
++++ b/lib/nss.c
+@@ -1603,8 +1603,11 @@ static CURLcode nss_connect_common(struct connectdata *conn, int sockindex,
+   const bool blocking = (done == NULL);
+   CURLcode rv;
+ 
+-  if(connssl->state == ssl_connection_complete)
++  if(connssl->state == ssl_connection_complete) {
++    if(!blocking)
++      *done = TRUE;
+     return CURLE_OK;
++  }
+ 
+   if(connssl->connecting_state == ssl_connect_1) {
+     rv = nss_setup_connect(conn, sockindex);
+-- 
+2.7.4
+

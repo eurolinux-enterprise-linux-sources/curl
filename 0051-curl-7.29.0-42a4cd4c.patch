@@ -1,0 +1,102 @@
+From 93c0d8e98f3859c91fbfa2a6998235ee899e878e Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Thu, 20 Jul 2017 08:05:59 +0200
+Subject: [PATCH 1/2] nss: unify the coding style of nss_send() and nss_recv()
+
+No changes in behavior intended by this commit.
+
+Upstream-commit: c89eb6d0f87a3620074bc04a6af255e5dc3a523e
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/nss.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/lib/nss.c b/lib/nss.c
+index 9e0e373..ce1e25a 100644
+--- a/lib/nss.c
++++ b/lib/nss.c
+@@ -1689,9 +1689,10 @@ static ssize_t nss_send(struct connectdata *conn,  /* connection data */
+                         size_t len,                /* amount to write */
+                         CURLcode *curlcode)
+ {
+-  int rc;
++  struct ssl_connect_data *connssl = &conn->ssl[sockindex];
++  ssize_t rc;
+ 
+-  rc = PR_Send(conn->ssl[sockindex].handle, mem, (int)len, 0, -1);
++  rc = PR_Send(connssl->handle, mem, (int)len, 0, -1);
+ 
+   if(rc < 0) {
+     PRInt32 err = PR_GetError();
+@@ -1714,15 +1715,16 @@ static ssize_t nss_send(struct connectdata *conn,  /* connection data */
+   return rc; /* number of bytes */
+ }
+ 
+-static ssize_t nss_recv(struct connectdata * conn, /* connection data */
+-                        int num,                   /* socketindex */
++static ssize_t nss_recv(struct connectdata *conn,  /* connection data */
++                        int sockindex,             /* socketindex */
+                         char *buf,                 /* store read data here */
+                         size_t buffersize,         /* max amount to read */
+                         CURLcode *curlcode)
+ {
++  struct ssl_connect_data *connssl = &conn->ssl[sockindex];
+   ssize_t nread;
+ 
+-  nread = PR_Recv(conn->ssl[num].handle, buf, (int)buffersize, 0, -1);
++  nread = PR_Recv(connssl->handle, buf, (int)buffersize, 0, -1);
+   if(nread < 0) {
+     /* failed SSL read */
+     PRInt32 err = PR_GetError();
+-- 
+2.13.5
+
+
+From 032731492497a1cde17752f8c178719bd32a7722 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Wed, 19 Jul 2017 18:02:26 +0200
+Subject: [PATCH 2/2] nss: fix a possible use-after-free in SelectClientCert()
+
+... causing a SIGSEGV in showit() in case the handle used to initiate
+the connection has already been freed.
+
+This commit fixes a bug introduced in curl-7_19_5-204-g5f0cae803.
+
+Reported-by: Rob Sanders
+Bug: https://bugzilla.redhat.com/1436158
+
+Upstream-commit: 42a4cd4c78b3feb5ca07286479129116e125a730
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/nss.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/lib/nss.c b/lib/nss.c
+index ce1e25a..b73a1e8 100644
+--- a/lib/nss.c
++++ b/lib/nss.c
+@@ -1692,6 +1692,10 @@ static ssize_t nss_send(struct connectdata *conn,  /* connection data */
+   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
+   ssize_t rc;
+ 
++  /* The SelectClientCert() hook uses this for infof() and failf() but the
++     handle stored in nss_setup_connect() could have already been freed. */
++  connssl->data = conn->data;
++
+   rc = PR_Send(connssl->handle, mem, (int)len, 0, -1);
+ 
+   if(rc < 0) {
+@@ -1724,6 +1728,10 @@ static ssize_t nss_recv(struct connectdata *conn,  /* connection data */
+   struct ssl_connect_data *connssl = &conn->ssl[sockindex];
+   ssize_t nread;
+ 
++  /* The SelectClientCert() hook uses this for infof() and failf() but the
++     handle stored in nss_setup_connect() could have already been freed. */
++  connssl->data = conn->data;
++
+   nread = PR_Recv(connssl->handle, buf, (int)buffersize, 0, -1);
+   if(nread < 0) {
+     /* failed SSL read */
+-- 
+2.13.5
+

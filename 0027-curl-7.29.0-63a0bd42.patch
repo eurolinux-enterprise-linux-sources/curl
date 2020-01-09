@@ -1,0 +1,64 @@
+From 2ac0f436a3ed216d3fc634592d302c6b8efe25d0 Mon Sep 17 00:00:00 2001
+From: Frank Meier <frank.meier@ergon.ch>
+Date: Fri, 22 Aug 2014 14:54:41 +0200
+Subject: [PATCH] NTLM: ignore CURLOPT_FORBID_REUSE during NTLM HTTP auth
+
+Problem: if CURLOPT_FORBID_REUSE is set, requests using NTLM failed
+since NTLM requires multiple requests that re-use the same connection
+for the authentication to work
+
+Solution: Ignore the forbid reuse flag in case the NTLM authentication
+handshake is in progress, according to the NTLM state flag.
+
+Fixed known bug #77.
+
+Upstream-commit: 63a0bd4270decef04e64fbe497b42f2c9e26c62b
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/KNOWN_BUGS | 4 ----
+ lib/url.c       | 7 +++++--
+ 2 files changed, 5 insertions(+), 6 deletions(-)
+
+diff --git a/docs/KNOWN_BUGS b/docs/KNOWN_BUGS
+index d363827..170987e 100644
+--- a/docs/KNOWN_BUGS
++++ b/docs/KNOWN_BUGS
+@@ -18,10 +18,6 @@ may have been fixed since this was written!
+   any file at all. Like when using FTP.
+   http://curl.haxx.se/bug/view.cgi?id=3438362
+ 
+-77. CURLOPT_FORBID_REUSE on a handle prevents NTLM from working since it
+-  "abuses" the underlying connection re-use system and if connections are
+-  forced to close they break the NTLM support.
+-
+ 76. The SOCKET type in Win64 is 64 bits large (and thus so is curl_socket_t on
+   that platform), and long is only 32 bits. It makes it impossible for
+   curl_easy_getinfo() to return a socket properly with the CURLINFO_LASTSOCKET
+diff --git a/lib/url.c b/lib/url.c
+index de8e153..5fcef89 100644
+--- a/lib/url.c
++++ b/lib/url.c
+@@ -5252,7 +5252,8 @@ CURLcode Curl_done(struct connectdata **connp,
+   }
+ 
+   /* if data->set.reuse_forbid is TRUE, it means the libcurl client has
+-     forced us to close this no matter what we think.
++     forced us to close this connection. This is ignored for requests taking
++     place in a NTLM authentication handshake
+ 
+      if conn->bits.close is TRUE, it means that the connection should be
+      closed in spite of all our efforts to be nice, due to protocol
+@@ -5267,7 +5268,9 @@ CURLcode Curl_done(struct connectdata **connp,
+      connection_id == -1 here means that the connection has not been added
+      to the connection cache (OOM) and thus we must disconnect it here.
+   */
+-  if(data->set.reuse_forbid || conn->bits.close || premature ||
++  if((data->set.reuse_forbid && !(conn->ntlm.state == NTLMSTATE_TYPE2 ||
++                                  conn->proxyntlm.state == NTLMSTATE_TYPE2))
++     || conn->bits.close || premature ||
+      (-1 == conn->connection_id)) {
+     CURLcode res2 = Curl_disconnect(conn, premature); /* close connection */
+ 
+-- 
+2.1.0
+

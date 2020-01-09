@@ -1,0 +1,509 @@
+From 5285b2518773185c049b0c2af980654a0b1c6871 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Wed, 8 Mar 2017 12:21:09 +0100
+Subject: [PATCH 1/4] socks: use proxy_user instead of proxy_name
+
+... to make it obvious what the data is used for
+
+Upstream-commit: 641072b919b1a52c58664cd18619f8dd1c4c0cee
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/socks.c | 30 +++++++++++++++---------------
+ 1 file changed, 15 insertions(+), 15 deletions(-)
+
+diff --git a/lib/socks.c b/lib/socks.c
+index 0cf397c..9aac9ca 100644
+--- a/lib/socks.c
++++ b/lib/socks.c
+@@ -106,7 +106,7 @@ int Curl_blockread_all(struct connectdata *conn, /* connection data */
+ *   Set protocol4a=true for  "SOCKS 4A (Simple Extension to SOCKS 4 Protocol)"
+ *   Nonsupport "Identification Protocol (RFC1413)"
+ */
+-CURLcode Curl_SOCKS4(const char *proxy_name,
++CURLcode Curl_SOCKS4(const char *proxy_user,
+                      const char *hostname,
+                      int remote_port,
+                      int sockindex,
+@@ -200,8 +200,8 @@ CURLcode Curl_SOCKS4(const char *proxy_name,
+    * This is currently not supporting "Identification Protocol (RFC1413)".
+    */
+   socksreq[8] = 0; /* ensure empty userid is NUL-terminated */
+-  if(proxy_name)
+-    strlcat((char*)socksreq + 8, proxy_name, sizeof(socksreq) - 8);
++  if(proxy_user)
++    strlcat((char*)socksreq + 8, proxy_user, sizeof(socksreq) - 8);
+ 
+   /*
+    * Make connection
+@@ -337,7 +337,7 @@ CURLcode Curl_SOCKS4(const char *proxy_name,
+  * This function logs in to a SOCKS5 proxy and sends the specifics to the final
+  * destination server.
+  */
+-CURLcode Curl_SOCKS5(const char *proxy_name,
++CURLcode Curl_SOCKS5(const char *proxy_user,
+                      const char *proxy_password,
+                      const char *hostname,
+                      int remote_port,
+@@ -410,12 +410,12 @@ CURLcode Curl_SOCKS5(const char *proxy_name,
+ 
+   socksreq[0] = 5; /* version */
+ #if defined(HAVE_GSSAPI) || defined(USE_WINDOWS_SSPI)
+-  socksreq[1] = (char)(proxy_name ? 3 : 2); /* number of methods (below) */
++  socksreq[1] = (char)(proxy_user ? 3 : 2); /* number of methods (below) */
+   socksreq[2] = 0; /* no authentication */
+   socksreq[3] = 1; /* gssapi */
+   socksreq[4] = 2; /* username/password */
+ #else
+-  socksreq[1] = (char)(proxy_name ? 2 : 1); /* number of methods (below) */
++  socksreq[1] = (char)(proxy_user ? 2 : 1); /* number of methods (below) */
+   socksreq[2] = 0; /* no authentication */
+   socksreq[3] = 2; /* username/password */
+ #endif
+@@ -474,13 +474,13 @@ CURLcode Curl_SOCKS5(const char *proxy_name,
+ #endif
+   else if(socksreq[1] == 2) {
+     /* Needs user name and password */
+-    size_t proxy_name_len, proxy_password_len;
+-    if(proxy_name && proxy_password) {
+-      proxy_name_len = strlen(proxy_name);
++    size_t proxy_user_len, proxy_password_len;
++    if(proxy_user && proxy_password) {
++      proxy_user_len = strlen(proxy_user);
+       proxy_password_len = strlen(proxy_password);
+     }
+     else {
+-      proxy_name_len = 0;
++      proxy_user_len = 0;
+       proxy_password_len = 0;
+     }
+ 
+@@ -493,10 +493,10 @@ CURLcode Curl_SOCKS5(const char *proxy_name,
+      */
+     len = 0;
+     socksreq[len++] = 1;    /* username/pw subnegotiation version */
+-    socksreq[len++] = (unsigned char) proxy_name_len;
+-    if(proxy_name && proxy_name_len)
+-      memcpy(socksreq + len, proxy_name, proxy_name_len);
+-    len += proxy_name_len;
++    socksreq[len++] = (unsigned char) proxy_user_len;
++    if(proxy_user && proxy_user_len)
++      memcpy(socksreq + len, proxy_user, proxy_user_len);
++    len += proxy_user_len;
+     socksreq[len++] = (unsigned char) proxy_password_len;
+     if(proxy_password && proxy_password_len)
+       memcpy(socksreq + len, proxy_password, proxy_password_len);
+@@ -535,7 +535,7 @@ CURLcode Curl_SOCKS5(const char *proxy_name,
+     }
+     else if(socksreq[1] == 255) {
+ #endif
+-      if(!proxy_name || !*proxy_name) {
++      if(!proxy_user || !*proxy_user) {
+         failf(data,
+               "No authentication method was acceptable. (It is quite likely"
+               " that the SOCKS5 server wanted a username/password, since none"
+-- 
+2.13.5
+
+
+From 3676c3fab628e848270e2169398f912a1449c31b Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Wed, 8 Mar 2017 12:16:01 +0100
+Subject: [PATCH 2/4] socks: deduplicate the code for auth request
+
+Upstream-commit: cd1c9f08078d4a8566ed10f6df9ae9a729f3290b
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/socks.c | 19 ++++++++++---------
+ 1 file changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/lib/socks.c b/lib/socks.c
+index 9aac9ca..398e0ac 100644
+--- a/lib/socks.c
++++ b/lib/socks.c
+@@ -362,6 +362,7 @@ CURLcode Curl_SOCKS5(const char *proxy_user,
+   */
+ 
+   unsigned char socksreq[600]; /* room for large user/pw (255 max each) */
++  int idx;
+   ssize_t actualread;
+   ssize_t written;
+   int result;
+@@ -408,17 +409,17 @@ CURLcode Curl_SOCKS5(const char *proxy_user,
+     return CURLE_COULDNT_CONNECT;
+   }
+ 
+-  socksreq[0] = 5; /* version */
++  idx = 0;
++  socksreq[idx++] = 5;   /* version */
++  idx++;                 /* reserve for the number of authentication methods */
++  socksreq[idx++] = 0;   /* no authentication */
+ #if defined(HAVE_GSSAPI) || defined(USE_WINDOWS_SSPI)
+-  socksreq[1] = (char)(proxy_user ? 3 : 2); /* number of methods (below) */
+-  socksreq[2] = 0; /* no authentication */
+-  socksreq[3] = 1; /* gssapi */
+-  socksreq[4] = 2; /* username/password */
+-#else
+-  socksreq[1] = (char)(proxy_user ? 2 : 1); /* number of methods (below) */
+-  socksreq[2] = 0; /* no authentication */
+-  socksreq[3] = 2; /* username/password */
++  socksreq[idx++] = 1;   /* GSS-API */
+ #endif
++  if(proxy_user)
++    socksreq[idx++] = 2; /* username/password */
++  /* write the number of authentication methods */
++  socksreq[1] = (unsigned char) (idx - 2);
+ 
+   curlx_nonblock(sock, FALSE);
+ 
+-- 
+2.13.5
+
+
+From a76468431c030fc832aed7a5fa5b4b3f9acfe2ae Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Thu, 27 Apr 2017 15:18:49 +0200
+Subject: [PATCH 3/4] CURLOPT_SOCKS5_AUTH: allowed methods for SOCKS5 proxy
+ auth
+
+If libcurl was built with GSS-API support, it unconditionally advertised
+GSS-API authentication while connecting to a SOCKS5 proxy.  This caused
+problems in environments with improperly configured Kerberos: a stock
+libcurl failed to connect, despite libcurl built without GSS-API
+connected fine using username and password.
+
+This commit introduces the CURLOPT_SOCKS5_AUTH option to control the
+allowed methods for SOCKS5 authentication at run time.
+
+Note that a new option was preferred over reusing CURLOPT_PROXYAUTH
+for compatibility reasons because the set of authentication methods
+allowed by default was different for HTTP and SOCKS5 proxies.
+
+Bug: https://curl.haxx.se/mail/lib-2017-01/0005.html
+Closes https://github.com/curl/curl/pull/1454
+
+Upstream-commit: 8924f58c370afa756fc4fd13916dfdea91d21b21
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/libcurl/curl_easy_setopt.3  |  8 ++++++++
+ docs/libcurl/symbols-in-versions |  2 ++
+ include/curl/curl.h              |  6 ++++++
+ lib/socks.c                      | 27 ++++++++++++++++++---------
+ lib/url.c                        |  8 ++++++++
+ lib/urldata.h                    |  1 +
+ 6 files changed, 43 insertions(+), 9 deletions(-)
+
+diff --git a/docs/libcurl/curl_easy_setopt.3 b/docs/libcurl/curl_easy_setopt.3
+index 0a9375e..4ce8207 100644
+--- a/docs/libcurl/curl_easy_setopt.3
++++ b/docs/libcurl/curl_easy_setopt.3
+@@ -862,6 +862,14 @@ Set the parameter to 1 to make the library tunnel all operations through a
+ given HTTP proxy. There is a big difference between using a proxy and to
+ tunnel through it. If you don't know what this means, you probably don't want
+ this tunneling option.
++.IP CURLOPT_SOCKS5_AUTH
++Pass a long as parameter, which is set to a bitmask, to tell libcurl which
++authentication method(s) are allowed for SOCKS5 proxy authentication.  The only
++supported flags are \fICURLAUTH_BASIC\fP, which allows username/password
++authentication, \fICURLAUTH_GSSAPI\fP, which allows GSS-API authentication, and
++\fICURLAUTH_NONE\fP, which allows no authentication.  Set the actual user name
++and password with the \fICURLOPT_PROXYUSERPWD(3)\fP option.  Defaults to
++\fICURLAUTH_BASIC|CURLAUTH_GSSAPI\fP.  (Added in 7.55.0)
+ .IP CURLOPT_SOCKS5_GSSAPI_SERVICE
+ Pass a char * as parameter to a string holding the name of the service. The
+ default service name for a SOCKS5 server is rcmd/server-fqdn. This option
+diff --git a/docs/libcurl/symbols-in-versions b/docs/libcurl/symbols-in-versions
+index 0f7469d..b0b6232 100644
+--- a/docs/libcurl/symbols-in-versions
++++ b/docs/libcurl/symbols-in-versions
+@@ -17,6 +17,7 @@ CURLAUTH_ANYSAFE                7.10.6
+ CURLAUTH_BASIC                  7.10.6
+ CURLAUTH_DIGEST                 7.10.6
+ CURLAUTH_DIGEST_IE              7.19.3
++CURLAUTH_GSSAPI                 7.55.0
+ CURLAUTH_GSSNEGOTIATE           7.10.6
+ CURLAUTH_NONE                   7.10.6
+ CURLAUTH_NTLM                   7.10.6
+@@ -454,6 +455,7 @@ CURLOPT_SERVER_RESPONSE_TIMEOUT 7.20.0
+ CURLOPT_SHARE                   7.10
+ CURLOPT_SOCKOPTDATA             7.16.0
+ CURLOPT_SOCKOPTFUNCTION         7.16.0
++CURLOPT_SOCKS5_AUTH             7.55.0
+ CURLOPT_SOCKS5_GSSAPI_NEC       7.19.4
+ CURLOPT_SOCKS5_GSSAPI_SERVICE   7.19.4
+ CURLOPT_SOURCE_HOST             7.12.1        -           7.15.5
+diff --git a/include/curl/curl.h b/include/curl/curl.h
+index 14f6fd7..0375a64 100644
+--- a/include/curl/curl.h
++++ b/include/curl/curl.h
+@@ -626,6 +626,9 @@ typedef enum {
+ #define CURLAUTH_ANY          (~CURLAUTH_DIGEST_IE)
+ #define CURLAUTH_ANYSAFE      (~(CURLAUTH_BASIC|CURLAUTH_DIGEST_IE))
+ 
++/* Used for CURLOPT_SOCKS5_AUTH to stay terminologically correct */
++#define CURLAUTH_GSSAPI CURLAUTH_GSSNEGOTIATE
++
+ #define CURLSSH_AUTH_ANY       ~0     /* all types supported by the server */
+ #define CURLSSH_AUTH_NONE      0      /* none allowed, silly but complete */
+ #define CURLSSH_AUTH_PUBLICKEY (1<<0) /* public/private key files */
+@@ -1539,6 +1542,9 @@ typedef enum {
+   /* Path to UNIX domain socket */
+   CINIT(UNIX_SOCKET_PATH, OBJECTPOINT, 231),
+ 
++  /* bitmask of allowed auth methods for connections to SOCKS5 proxies */
++  CINIT(SOCKS5_AUTH, LONG, 267),
++
+   CURLOPT_LASTENTRY /* the last unused */
+ } CURLoption;
+ 
+diff --git a/lib/socks.c b/lib/socks.c
+index 398e0ac..5900063 100644
+--- a/lib/socks.c
++++ b/lib/socks.c
+@@ -373,6 +373,8 @@ CURLcode Curl_SOCKS5(const char *proxy_user,
+   bool socks5_resolve_local = (conn->proxytype == CURLPROXY_SOCKS5)?TRUE:FALSE;
+   const size_t hostname_len = strlen(hostname);
+   ssize_t len = 0;
++  const unsigned long auth = data->set.socks5auth;
++  bool allow_gssapi = FALSE;
+ 
+   /* RFC1928 chapter 5 specifies max 255 chars for domain name in packet */
+   if(!socks5_resolve_local && hostname_len > 255) {
+@@ -409,13 +411,24 @@ CURLcode Curl_SOCKS5(const char *proxy_user,
+     return CURLE_COULDNT_CONNECT;
+   }
+ 
++  if(auth & ~(CURLAUTH_BASIC | CURLAUTH_GSSAPI))
++    infof(conn->data,
++        "warning: unsupported value passed to CURLOPT_SOCKS5_AUTH: %lu\n",
++        auth);
++  if(!(auth & CURLAUTH_BASIC))
++    /* disable username/password auth */
++    proxy_user = NULL;
++#if defined(HAVE_GSSAPI) || defined(USE_WINDOWS_SSPI)
++  if(auth & CURLAUTH_GSSAPI)
++    allow_gssapi = TRUE;
++#endif
++
+   idx = 0;
+   socksreq[idx++] = 5;   /* version */
+   idx++;                 /* reserve for the number of authentication methods */
+   socksreq[idx++] = 0;   /* no authentication */
+-#if defined(HAVE_GSSAPI) || defined(USE_WINDOWS_SSPI)
+-  socksreq[idx++] = 1;   /* GSS-API */
+-#endif
++  if(allow_gssapi)
++    socksreq[idx++] = 1; /* GSS-API */
+   if(proxy_user)
+     socksreq[idx++] = 2; /* username/password */
+   /* write the number of authentication methods */
+@@ -465,7 +478,7 @@ CURLcode Curl_SOCKS5(const char *proxy_user,
+     ;
+   }
+ #if defined(HAVE_GSSAPI) || defined(USE_WINDOWS_SSPI)
+-  else if(socksreq[1] == 1) {
++  else if(allow_gssapi && (socksreq[1] == 1)) {
+     code = Curl_SOCKS5_gssapi_negotiate(sockindex, conn);
+     if(code != CURLE_OK) {
+       failf(data, "Unable to negotiate SOCKS5 gssapi context.");
+@@ -526,16 +539,12 @@ CURLcode Curl_SOCKS5(const char *proxy_user,
+   }
+   else {
+     /* error */
+-#if defined(HAVE_GSSAPI) || defined(USE_WINDOWS_SSPI)
+-    if(socksreq[1] == 255) {
+-#else
+-    if(socksreq[1] == 1) {
++    if(!allow_gssapi && (socksreq[1] == 1)) {
+       failf(data,
+             "SOCKS5 GSSAPI per-message authentication is not supported.");
+       return CURLE_COULDNT_CONNECT;
+     }
+     else if(socksreq[1] == 255) {
+-#endif
+       if(!proxy_user || !*proxy_user) {
+         failf(data,
+               "No authentication method was acceptable. (It is quite likely"
+diff --git a/lib/url.c b/lib/url.c
+index 19a40c7..d632813 100644
+--- a/lib/url.c
++++ b/lib/url.c
+@@ -516,6 +516,9 @@ CURLcode Curl_init_userdefined(struct UserDefined *set)
+   set->httpauth = CURLAUTH_BASIC;  /* defaults to basic */
+   set->proxyauth = CURLAUTH_BASIC; /* defaults to basic */
+ 
++  /* SOCKS5 proxy auth defaults to username/password + GSS-API */
++  set->socks5auth = CURLAUTH_BASIC | CURLAUTH_GSSAPI;
++
+   /* make libcurl quiet by default: */
+   set->hide_progress = TRUE;  /* CURLOPT_NOPROGRESS changes these */
+ 
+@@ -1380,6 +1383,11 @@ CURLcode Curl_setopt(struct SessionHandle *data, CURLoption option,
+     break;
+ #endif   /* CURL_DISABLE_PROXY */
+ 
++  case CURLOPT_SOCKS5_AUTH:
++    data->set.socks5auth = va_arg(param, unsigned long);
++    if(data->set.socks5auth & ~(CURLAUTH_BASIC | CURLAUTH_GSSAPI))
++      result = CURLE_NOT_BUILT_IN;
++    break;
+ #if defined(HAVE_GSSAPI) || defined(USE_WINDOWS_SSPI)
+   case CURLOPT_SOCKS5_GSSAPI_SERVICE:
+     /*
+diff --git a/lib/urldata.h b/lib/urldata.h
+index f4c6222..3e6ace5 100644
+--- a/lib/urldata.h
++++ b/lib/urldata.h
+@@ -1406,6 +1406,7 @@ struct UserDefined {
+   long use_port;     /* which port to use (when not using default) */
+   unsigned long httpauth;  /* kind of HTTP authentication to use (bitmask) */
+   unsigned long proxyauth; /* kind of proxy authentication to use (bitmask) */
++  unsigned long socks5auth;/* kind of SOCKS5 authentication to use (bitmask) */
+   long followlocation; /* as in HTTP Location: */
+   long maxredirs;    /* maximum no. of http(s) redirects to follow, set to -1
+                         for infinity */
+-- 
+2.13.5
+
+
+From 08f6dc218afe2d7e74f87996965f0770a566f185 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Fri, 19 May 2017 18:11:47 +0200
+Subject: [PATCH 4/4] curl --socks5-{basic,gssapi}: control socks5 auth
+
+Closes https://github.com/curl/curl/pull/1454
+
+Upstream-commit: ce2c3ebda20919fe636e675f219ae387e386f508
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/curl.1         | 10 ++++++++++
+ src/tool_cfgable.h  |  1 +
+ src/tool_getparam.c | 16 ++++++++++++++++
+ src/tool_help.c     |  2 ++
+ src/tool_operate.c  |  5 +++++
+ src/tool_setopt.c   |  1 +
+ src/tool_setopt.h   |  1 +
+ 7 files changed, 36 insertions(+)
+
+diff --git a/docs/curl.1 b/docs/curl.1
+index c9bb336..7906f1f 100644
+--- a/docs/curl.1
++++ b/docs/curl.1
+@@ -1343,6 +1343,16 @@ Since 7.21.7, this option is superfluous since you can specify a socks4a proxy
+ with \fI-x, --proxy\fP using a socks4a:// protocol prefix.
+ 
+ If this option is used several times, the last one will be used.
++.IP "--socks5-basic"
++Tells curl to use username/password authentication when connecting to a SOCKS5
++proxy.  The username/password authentication is enabled by default.  Use
++\fI--socks5-gssapi\fP to force GSS-API authentication to SOCKS5 proxies.
++(Added in 7.55.0)
++.IP "--socks5-gssapi"
++Tells curl to use GSS-API authentication when connecting to a SOCKS5 proxy.
++The GSS-API authentication is enabled by default (if curl is compiled with
++GSS-API support).  Use \fI--socks5-basic\fP to force username/password
++authentication to SOCKS5 proxies.  (Added in 7.55.0)
+ .IP "--socks5-hostname <host[:port]>"
+ Use the specified SOCKS5 proxy (and let the proxy resolve the host name). If
+ the port number is not specified, it is assumed at port 1080. (Added in
+diff --git a/src/tool_cfgable.h b/src/tool_cfgable.h
+index a9b033b..68d0297 100644
+--- a/src/tool_cfgable.h
++++ b/src/tool_cfgable.h
+@@ -172,6 +172,7 @@ struct Configurable {
+                                  * default rcmd */
+   int socks5_gssapi_nec ;   /* The NEC reference server does not protect
+                              * the encryption type exchange */
++  unsigned long socks5_auth;/* auth bitmask for socks5 proxies */
+ 
+   bool tcp_nodelay;
+   long req_retry;           /* number of retries */
+diff --git a/src/tool_getparam.c b/src/tool_getparam.c
+index 33db742..32fc68b 100644
+--- a/src/tool_getparam.c
++++ b/src/tool_getparam.c
+@@ -210,6 +210,8 @@ static const struct LongShort aliases[]= {
+   {"El", "tlspassword",              TRUE},
+   {"Em", "tlsauthtype",              TRUE},
+   {"En", "ssl-allow-beast",          FALSE},
++  {"EA", "socks5-basic",             FALSE},
++  {"EB", "socks5-gssapi",            FALSE},
+   {"f",  "fail",                     FALSE},
+   {"F",  "form",                     TRUE},
+   {"Fs", "form-string",              TRUE},
+@@ -1324,6 +1326,20 @@ ParameterError getparameter(char *flag,    /* f or -long-flag */
+         if(curlinfo->features & CURL_VERSION_SSL)
+           config->ssl_allow_beast = toggle;
+         break;
++      case 'A':
++        /* --socks5-basic */
++        if(toggle)
++          config->socks5_auth |= CURLAUTH_BASIC;
++        else
++          config->socks5_auth &= ~CURLAUTH_BASIC;
++        break;
++      case 'B':
++        /* --socks5-gssapi */
++        if(toggle)
++          config->socks5_auth |= CURLAUTH_GSSAPI;
++        else
++          config->socks5_auth &= ~CURLAUTH_GSSAPI;
++        break;
+       default: /* certificate file */
+       {
+         char *certname, *passphrase;
+diff --git a/src/tool_help.c b/src/tool_help.c
+index 3a64e35..c2883eb 100644
+--- a/src/tool_help.c
++++ b/src/tool_help.c
+@@ -179,6 +179,8 @@ static const char *const helptext[] = {
+   "     --socks4 HOST[:PORT]  SOCKS4 proxy on given host + port",
+   "     --socks4a HOST[:PORT]  SOCKS4a proxy on given host + port",
+   "     --socks5 HOST[:PORT]  SOCKS5 proxy on given host + port",
++  "     --socks5-basic  Enable username/password auth for SOCKS5 proxies",
++  "     --socks5-gssapi Enable GSS-API auth for SOCKS5 proxies",
+   "     --socks5-hostname HOST[:PORT] "
+   "SOCKS5 proxy, pass host name to proxy",
+ #if defined(HAVE_GSSAPI) || defined(USE_WINDOWS_SSPI)
+diff --git a/src/tool_operate.c b/src/tool_operate.c
+index 41b0e6b..185f9c6 100644
+--- a/src/tool_operate.c
++++ b/src/tool_operate.c
+@@ -1208,6 +1208,11 @@ int operate(struct Configurable *config, int argc, argv_item_t argv[])
+           if(config->socks5_gssapi_nec)
+             my_setopt_str(curl, CURLOPT_SOCKS5_GSSAPI_NEC,
+                           config->socks5_gssapi_nec);
++
++          /* new in curl 7.55.0 */
++          if(config->socks5_auth)
++            my_setopt_bitmask(curl, CURLOPT_SOCKS5_AUTH,
++                              (long)config->socks5_auth);
+         }
+ #endif
+         /* curl 7.13.0 */
+diff --git a/src/tool_setopt.c b/src/tool_setopt.c
+index 9860117..5ae32cd 100644
+--- a/src/tool_setopt.c
++++ b/src/tool_setopt.c
+@@ -130,6 +130,7 @@ const NameValue setopt_nv_CURLPROTO[] = {
+ static const NameValue setopt_nv_CURLNONZERODEFAULTS[] = {
+   NV1(CURLOPT_SSL_VERIFYPEER, 1),
+   NV1(CURLOPT_SSL_VERIFYHOST, 1),
++  NV1(CURLOPT_SOCKS5_AUTH, 1),
+   NVEND
+ };
+ 
+diff --git a/src/tool_setopt.h b/src/tool_setopt.h
+index d107756..60e614c 100644
+--- a/src/tool_setopt.h
++++ b/src/tool_setopt.h
+@@ -64,6 +64,7 @@ extern const NameValueUnsigned setopt_nv_CURLAUTH[];
+ #define setopt_nv_CURLOPT_REDIR_PROTOCOLS setopt_nv_CURLPROTO
+ #define setopt_nv_CURLOPT_PROXYTYPE setopt_nv_CURLPROXY
+ #define setopt_nv_CURLOPT_PROXYAUTH setopt_nv_CURLAUTH
++#define setopt_nv_CURLOPT_SOCKS5_AUTH setopt_nv_CURLAUTH
+ 
+ /* Intercept setopt calls for --libcurl */
+ 
+-- 
+2.13.5
+

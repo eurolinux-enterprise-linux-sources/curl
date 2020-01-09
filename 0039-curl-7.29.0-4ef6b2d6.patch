@@ -1,0 +1,44 @@
+From 853653f4958e73bfd90a74a3ca910484ff86d9b0 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Fri, 12 Feb 2016 18:39:57 +0100
+Subject: [PATCH] curl.1: --disable-{eprt,epsv} are ignored for IPv6 hosts
+
+The behavior has been clarified in CURLOPT_FTP_USE_{EPRT,EPSV}.3 man
+pages since curl-7_12_3~131.  This patch makes it clear in the curl.1
+man page, too.
+
+Bug: https://bugzilla.redhat.com/1305970
+
+Upstream-commit: 4ef6b2d6c60824d7c598a4ca8a70f0ef4fa3d443
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/curl.1 | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/docs/curl.1 b/docs/curl.1
+index d1675a0..ad26007 100644
+--- a/docs/curl.1
++++ b/docs/curl.1
+@@ -357,6 +357,9 @@ the traditional PORT command.
+ \fB--eprt\fP can be used to explicitly enable EPRT again and \fB--no-eprt\fP
+ is an alias for \fB--disable-eprt\fP.
+ 
++If the server is an IPv6 host, this option will have no effect as EPRT is
++necessary then.
++
+ Disabling EPRT only changes the active behavior. If you want to switch to
+ passive mode you need to not use \fI-P, --ftp-port\fP or force it with
+ \fI--ftp-pasv\fP.
+@@ -368,6 +371,9 @@ but with this option, it will not try using EPSV.
+ \fB--epsv\fP can be used to explicitly enable EPSV again and \fB--no-epsv\fP
+ is an alias for \fB--disable-epsv\fP.
+ 
++If the server is an IPv6 host, this option will have no effect as EPSV is
++necessary then.
++
+ Disabling EPSV only changes the passive behavior. If you want to switch to
+ active mode you need to use \fI-P, --ftp-port\fP.
+ .IP "-e, --referer <URL>"
+-- 
+2.5.0
+

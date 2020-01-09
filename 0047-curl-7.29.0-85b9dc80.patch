@@ -1,0 +1,151 @@
+From 5f543b36b2b05cbe52a9861ad7cb15e0a7c78c80 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Tue, 21 May 2013 23:28:59 +0200
+Subject: [PATCH] Curl_cookie_add: handle IPv6 hosts
+
+1 - don't skip host names with a colon in them in an attempt to bail out
+on HTTP headers in the cookie file parser. It was only a shortcut anyway
+and trying to parse a file with HTTP headers will still be handled, only
+slightly slower.
+
+2 - don't skip domain names based on number of dots. The original
+netscape cookie spec had this oddity mentioned and while our code
+decreased the check to only check for two, the existing cookie spec has
+no such dot counting required.
+
+Bug: http://curl.haxx.se/bug/view.cgi?id=1221
+Reported-by: Stefan Neis
+
+Upstream-commit: 85b9dc80232d1d7d48ee4dea6db5a2263ee68efd
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/cookie.c | 93 +++++++++++++++++-------------------------------------------
+ 1 file changed, 26 insertions(+), 67 deletions(-)
+
+diff --git a/lib/cookie.c b/lib/cookie.c
+index 764bbc9..956efd4 100644
+--- a/lib/cookie.c
++++ b/lib/cookie.c
+@@ -347,6 +347,9 @@ static bool isip(const char *domain)
+  *
+  * Add a single cookie line to the cookie keeping object.
+  *
++ * Be aware that sometimes we get an IP-only host name, and that might also be
++ * a numerical IPv6 address.
++ *
+  ***************************************************************************/
+ 
+ struct Cookie *
+@@ -458,73 +461,35 @@ Curl_cookie_add(struct SessionHandle *data,
+           }
+         }
+         else if(Curl_raw_equal("domain", name)) {
+-          /* note that this name may or may not have a preceding dot, but
+-             we don't care about that, we treat the names the same anyway */
+-
+-          const char *domptr=whatptr;
+-          const char *nextptr;
+-          int dotcount=1;
++          bool is_ip;
+ 
+-          /* Count the dots, we need to make sure that there are enough
+-             of them. */
++          /* Now, we make sure that our host is within the given domain,
++             or the given domain is not valid and thus cannot be set. */
+ 
+           if('.' == whatptr[0])
+-            /* don't count the initial dot, assume it */
+-            domptr++;
+-
+-          do {
+-            nextptr = strchr(domptr, '.');
+-            if(nextptr) {
+-              if(domptr != nextptr)
+-                dotcount++;
+-              domptr = nextptr+1;
++            whatptr++; /* ignore preceding dot */
++
++          is_ip = isip(domain ? domain : whatptr);
++
++          if(!domain
++             || (is_ip && !strcmp(whatptr, domain))
++             || (!is_ip && tailmatch(whatptr, domain))) {
++            strstore(&co->domain, whatptr);
++            if(!co->domain) {
++              badcookie = TRUE;
++              break;
+             }
+-          } while(nextptr);
+-
+-          /* The original Netscape cookie spec defined that this domain name
+-             MUST have three dots (or two if one of the seven holy TLDs),
+-             but it seems that these kinds of cookies are in use "out there"
+-             so we cannot be that strict. I've therefore lowered the check
+-             to not allow less than two dots. */
+-
+-          if(dotcount < 2) {
+-            /* Received and skipped a cookie with a domain using too few
+-               dots. */
+-            badcookie=TRUE; /* mark this as a bad cookie */
+-            infof(data, "skipped cookie with illegal dotcount domain: %s\n",
+-                  whatptr);
++            if(!is_ip)
++              co->tailmatch=TRUE; /* we always do that if the domain name was
++                                     given */
+           }
+           else {
+-            bool is_ip;
+-
+-            /* Now, we make sure that our host is within the given domain,
+-               or the given domain is not valid and thus cannot be set. */
+-
+-            if('.' == whatptr[0])
+-              whatptr++; /* ignore preceding dot */
+-
+-            is_ip = isip(domain ? domain : whatptr);
+-
+-            if(!domain
+-               || (is_ip && !strcmp(whatptr, domain))
+-               || (!is_ip && tailmatch(whatptr, domain))) {
+-              strstore(&co->domain, whatptr);
+-              if(!co->domain) {
+-                badcookie = TRUE;
+-                break;
+-              }
+-              if(!is_ip)
+-                co->tailmatch=TRUE; /* we always do that if the domain name was
+-                                       given */
+-            }
+-            else {
+-              /* we did not get a tailmatch and then the attempted set domain
+-                 is not a domain to which the current host belongs. Mark as
+-                 bad. */
+-              badcookie=TRUE;
+-              infof(data, "skipped cookie with bad tailmatch domain: %s\n",
+-                    whatptr);
+-            }
++            /* we did not get a tailmatch and then the attempted set domain
++               is not a domain to which the current host belongs. Mark as
++               bad. */
++            badcookie=TRUE;
++            infof(data, "skipped cookie with bad tailmatch domain: %s\n",
++                  whatptr);
+           }
+         }
+         else if(Curl_raw_equal("version", name)) {
+@@ -696,12 +661,6 @@ Curl_cookie_add(struct SessionHandle *data,
+ 
+     firstptr=strtok_r(lineptr, "\t", &tok_buf); /* tokenize it on the TAB */
+ 
+-    /* Here's a quick check to eliminate normal HTTP-headers from this */
+-    if(!firstptr || strchr(firstptr, ':')) {
+-      free(co);
+-      return NULL;
+-    }
+-
+     /* Now loop through the fields and init the struct we already have
+        allocated */
+     for(ptr=firstptr, fields=0; ptr && !badcookie;
+-- 
+2.5.5
+

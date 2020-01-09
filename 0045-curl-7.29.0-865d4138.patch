@@ -1,0 +1,859 @@
+From e0a1f91d29349d2ce45960f14ebe8e0fa043364e Mon Sep 17 00:00:00 2001
+From: Jared Jennings <jjenning@fastmail.fm>
+Date: Fri, 5 Apr 2013 16:01:31 +0200
+Subject: [PATCH 01/10] curl -E: allow to escape ':' in cert nickname
+
+Upstream-commit: 865d4138a08daff460f116c2494adb9c889f5304
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ src/tool_getparam.c | 123 ++++++++++++++++++++++++++++++++++++++++++----------
+ 1 file changed, 100 insertions(+), 23 deletions(-)
+
+diff --git a/src/tool_getparam.c b/src/tool_getparam.c
+index 57cf97d..db29c0d 100644
+--- a/src/tool_getparam.c
++++ b/src/tool_getparam.c
+@@ -290,6 +290,99 @@ static const struct feat feats[] = {
+   {"unix-sockets",   CURL_VERSION_UNIX_SOCKETS}
+ };
+ 
++/* https://sourceforge.net/p/curl/bugs/1196/ */
++static void parse_cert_parameter(const char *cert_parameter,
++                                 char **certname,
++                                 char **passphrase)
++{
++  size_t param_length = strlen(cert_parameter);
++  size_t parsed_chars = 0;
++  size_t span;
++  const char *param_place = NULL;
++  char *certname_place = NULL;
++  /* most trivial assumption: cert_parameter is empty */
++  if(param_length == 0) {
++    *certname = NULL;
++    *passphrase = NULL;
++    return;
++  }
++  /* next less trivial: cert_parameter contains no colon nor backslash; this
++   * means no passphrase was given and no characters escaped */
++  if(!strpbrk(cert_parameter, ":\\")) {
++    *certname = strdup(cert_parameter);
++    *passphrase = NULL;
++    return;
++  }
++  /* deal with escaped chars; find unescaped colon if it exists */
++  *certname = (char *) malloc(param_length + 1);
++  *passphrase = NULL;
++  param_place = cert_parameter;
++  certname_place = *certname;
++  param_place = cert_parameter;
++  while(*param_place) {
++    span = strcspn(param_place, ":\\");
++    strncpy(certname_place, param_place, span);
++    param_place += span;
++    certname_place += span;
++    *certname_place = '\0';
++    /* we just ate all the non-special chars. now we're on either a special
++     * char or the end of the string. */
++    switch(*param_place) {
++    case '\0':
++      break;
++    case '\\':
++      param_place++;
++      switch(*param_place) {
++        case '\0':
++          *certname_place++ = '\\';
++          break;
++        case '\\':
++          *certname_place++ = '\\';
++          param_place++;
++          break;
++        case ':':
++          *certname_place++ = ':';
++          param_place++;
++          break;
++        default:
++          *certname_place++ = '\\';
++          *certname_place++ = *param_place;
++          param_place++;
++          break;
++      }
++      break;
++    case ':':
++      /* Since we live in a world of weirdness and confusion, the win32
++         dudes can use : when using drive letters and thus c:\file:password
++         needs to work. In order not to break compatibility, we still use : as
++         separator, but we try to detect when it is used for a file name! On
++         windows. */
++#ifdef WIN32
++      if(param_place &&
++          (param_place == &cert_parameter[1]) &&
++          (cert_parameter[2] == '\\' || cert_parameter[2] == '/') &&
++          (ISALPHA(cert_parameter[0])) ) {
++        /* colon in the second column, followed by a backslash, and the
++           first character is an alphabetic letter:
++
++           this is a drive letter colon */
++        *certname_place++ = ':';
++        param_place++;
++        break;
++      }
++#endif
++      /* escaped colons and Windows drive letter colons were handled
++       * above; if we're still here, this is a separating colon */
++      param_place++;
++      if(strlen(param_place) > 0) {
++        *passphrase = strdup(param_place);
++      }
++      return;
++      break;
++    }
++  }
++}
++
+ ParameterError getparameter(char *flag,    /* f or -long-flag */
+                             char *nextarg, /* NULL if unset */
+                             bool *usedarg, /* set to TRUE if the arg
+@@ -1227,30 +1320,14 @@ ParameterError getparameter(char *flag,    /* f or -long-flag */
+         break;
+       default: /* certificate file */
+       {
+-        char *ptr = strchr(nextarg, ':');
+-        /* Since we live in a world of weirdness and confusion, the win32
+-           dudes can use : when using drive letters and thus
+-           c:\file:password needs to work. In order not to break
+-           compatibility, we still use : as separator, but we try to detect
+-           when it is used for a file name! On windows. */
+-#ifdef WIN32
+-        if(ptr &&
+-           (ptr == &nextarg[1]) &&
+-           (nextarg[2] == '\\' || nextarg[2] == '/') &&
+-           (ISALPHA(nextarg[0])) )
+-          /* colon in the second column, followed by a backslash, and the
+-             first character is an alphabetic letter:
+-
+-             this is a drive letter colon */
+-          ptr = strchr(&nextarg[3], ':'); /* find the next one instead */
+-#endif
+-        if(ptr) {
+-          /* we have a password too */
+-          *ptr = '\0';
+-          ptr++;
+-          GetStr(&config->key_passwd, ptr);
++        char *certname, *passphrase;
++        parse_cert_parameter(nextarg, &certname, &passphrase);
++        if(certname) {
++          GetStr(&config->cert, certname);
++        }
++        if(passphrase) {
++          GetStr(&config->key_passwd, passphrase);
+         }
+-        GetStr(&config->cert, nextarg);
+         cleanarg(nextarg);
+       }
+       }
+-- 
+2.7.4
+
+
+From 9a5f8a20402e549211d9df1d9ef0cb0b00e5ed8f Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Fri, 3 May 2013 23:12:00 +0200
+Subject: [PATCH 02/10] curl.1: document escape sequences recognized by -E
+
+Upstream-commit: 42e01cff9af12441eb60694af9c0c86817e8f7e0
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/curl.1 | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/docs/curl.1 b/docs/curl.1
+index ad26007..c9bb336 100644
+--- a/docs/curl.1
++++ b/docs/curl.1
+@@ -397,7 +397,10 @@ curl the nickname of the certificate to use within the NSS database defined
+ by the environment variable SSL_DIR (or by default /etc/pki/nssdb). If the
+ NSS PEM PKCS#11 module (libnsspem.so) is available then PEM files may be
+ loaded. If you want to use a file from the current directory, please precede
+-it with "./" prefix, in order to avoid confusion with a nickname.
++it with "./" prefix, in order to avoid confusion with a nickname.  If the
++nickname contains ":", it needs to be preceded by "\\" so that it is not
++recognized as password delimiter.  If the nickname contains "\\", it needs to
++be escaped as "\\\\" so that it is not recognized as an escape character.
+ 
+ If this option is used several times, the last one will be used.
+ .IP "--engine <name>"
+-- 
+2.7.4
+
+
+From fcfd1f85946ed0784365c55cf6c7a196c328308a Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Fri, 5 Apr 2013 16:10:46 +0200
+Subject: [PATCH 03/10] tool_getparam: describe what parse_cert_parameter()
+ does
+
+... and de-duplicate the code initializing *passphrase
+
+Upstream-commit: a15b2b6c6204766ef391c1831fb4506635bab0a6
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ src/tool_getparam.c | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/src/tool_getparam.c b/src/tool_getparam.c
+index db29c0d..77d44c4 100644
+--- a/src/tool_getparam.c
++++ b/src/tool_getparam.c
+@@ -290,32 +290,33 @@ static const struct feat feats[] = {
+   {"unix-sockets",   CURL_VERSION_UNIX_SOCKETS}
+ };
+ 
+-/* https://sourceforge.net/p/curl/bugs/1196/ */
++/* Split the argument of -E to 'certname' and 'passphrase' separated by colon.
++ * We allow ':' and '\' to be escaped by '\' so that we can use certificate
++ * nicknames containing ':'.  See <https://sourceforge.net/p/curl/bugs/1196/>
++ * for details. */
+ static void parse_cert_parameter(const char *cert_parameter,
+                                  char **certname,
+                                  char **passphrase)
+ {
+   size_t param_length = strlen(cert_parameter);
+-  size_t parsed_chars = 0;
+   size_t span;
+   const char *param_place = NULL;
+   char *certname_place = NULL;
++  *passphrase = NULL;
++
+   /* most trivial assumption: cert_parameter is empty */
+   if(param_length == 0) {
+     *certname = NULL;
+-    *passphrase = NULL;
+     return;
+   }
+   /* next less trivial: cert_parameter contains no colon nor backslash; this
+    * means no passphrase was given and no characters escaped */
+   if(!strpbrk(cert_parameter, ":\\")) {
+     *certname = strdup(cert_parameter);
+-    *passphrase = NULL;
+     return;
+   }
+   /* deal with escaped chars; find unescaped colon if it exists */
+   *certname = (char *) malloc(param_length + 1);
+-  *passphrase = NULL;
+   param_place = cert_parameter;
+   certname_place = *certname;
+   param_place = cert_parameter;
+@@ -378,7 +379,6 @@ static void parse_cert_parameter(const char *cert_parameter,
+         *passphrase = strdup(param_place);
+       }
+       return;
+-      break;
+     }
+   }
+ }
+-- 
+2.7.4
+
+
+From d9bbc65a4624ba78576e2a7d98dbbeccd4b8a3b3 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Fri, 3 May 2013 22:16:46 +0200
+Subject: [PATCH 04/10] tool_getparam: fix memleak in handling the -E option
+
+Upstream-commit: b47cf4f688297d9cf87a39c8aa328d9d07540e66
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ src/tool_getparam.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/tool_getparam.c b/src/tool_getparam.c
+index 77d44c4..02d95a7 100644
+--- a/src/tool_getparam.c
++++ b/src/tool_getparam.c
+@@ -1322,11 +1322,11 @@ ParameterError getparameter(char *flag,    /* f or -long-flag */
+       {
+         char *certname, *passphrase;
+         parse_cert_parameter(nextarg, &certname, &passphrase);
+-        if(certname) {
+-          GetStr(&config->cert, certname);
+-        }
++        Curl_safefree(config->cert);
++        config->cert = certname;
+         if(passphrase) {
+-          GetStr(&config->key_passwd, passphrase);
++          Curl_safefree(config->key_passwd);
++          config->key_passwd = passphrase;
+         }
+         cleanarg(nextarg);
+       }
+-- 
+2.7.4
+
+
+From 0cadf08557da47b826e8f3b3973be2fc80e50068 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Fri, 3 May 2013 22:57:18 +0200
+Subject: [PATCH 05/10] tool_getparam: ensure string termination in
+ parse_cert_parameter()
+
+Upstream-commit: 2de20dd9a1c6ad4d576c60ab704c30abfc826b1a
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ src/tool_getparam.c | 19 +++++++++++--------
+ 1 file changed, 11 insertions(+), 8 deletions(-)
+
+diff --git a/src/tool_getparam.c b/src/tool_getparam.c
+index 02d95a7..dd04f5f 100644
+--- a/src/tool_getparam.c
++++ b/src/tool_getparam.c
+@@ -302,13 +302,13 @@ static void parse_cert_parameter(const char *cert_parameter,
+   size_t span;
+   const char *param_place = NULL;
+   char *certname_place = NULL;
++  *certname = NULL;
+   *passphrase = NULL;
+ 
+   /* most trivial assumption: cert_parameter is empty */
+-  if(param_length == 0) {
+-    *certname = NULL;
++  if(param_length == 0)
+     return;
+-  }
++
+   /* next less trivial: cert_parameter contains no colon nor backslash; this
+    * means no passphrase was given and no characters escaped */
+   if(!strpbrk(cert_parameter, ":\\")) {
+@@ -316,16 +316,17 @@ static void parse_cert_parameter(const char *cert_parameter,
+     return;
+   }
+   /* deal with escaped chars; find unescaped colon if it exists */
+-  *certname = (char *) malloc(param_length + 1);
+-  param_place = cert_parameter;
+-  certname_place = *certname;
++  certname_place = malloc(param_length + 1);
++  if(!certname_place)
++    return;
++
++  *certname = certname_place;
+   param_place = cert_parameter;
+   while(*param_place) {
+     span = strcspn(param_place, ":\\");
+     strncpy(certname_place, param_place, span);
+     param_place += span;
+     certname_place += span;
+-    *certname_place = '\0';
+     /* we just ate all the non-special chars. now we're on either a special
+      * char or the end of the string. */
+     switch(*param_place) {
+@@ -378,9 +379,11 @@ static void parse_cert_parameter(const char *cert_parameter,
+       if(strlen(param_place) > 0) {
+         *passphrase = strdup(param_place);
+       }
+-      return;
++      goto done;
+     }
+   }
++done:
++  *certname_place = '\0';
+ }
+ 
+ ParameterError getparameter(char *flag,    /* f or -long-flag */
+-- 
+2.7.4
+
+
+From 47447c9e89e7f9b5acd60ca565996428d90b9e0e Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Fri, 3 May 2013 23:03:58 +0200
+Subject: [PATCH 06/10] src/Makefile.am: build static lib for unit tests if
+ enabled
+
+Upstream-commit: 683f2b832388d08999620ee45cb619a7afd42aaf
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ src/Makefile.am        |  8 ++++++++
+ src/tool_main.c        |  4 ++++
+ tests/unit/Makefile.am | 11 +++++++++--
+ 3 files changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 6863078..751beda 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -67,6 +67,14 @@ curl_LDFLAGS = @LIBMETALINK_LDFLAGS@
+ curl_CPPFLAGS = $(AM_CPPFLAGS) $(LIBMETALINK_CPPFLAGS)
+ curl_DEPENDENCIES = $(top_builddir)/lib/libcurl.la
+ 
++# if unit tests are enabled, build a static library to link them with
++if BUILD_UNITTESTS
++noinst_LTLIBRARIES = libcurltool.la
++libcurltool_la_CFLAGS = -DUNITTESTS
++libcurltool_la_LDFLAGS = -static $(LINKFLAGS)
++libcurltool_la_SOURCES = $(curl_SOURCES)
++endif
++
+ BUILT_SOURCES = tool_hugehelp.c
+ CLEANFILES = tool_hugehelp.c
+ # Use the C locale to ensure that only ASCII characters appear in the
+diff --git a/src/tool_main.c b/src/tool_main.c
+index 6a1ed6c..00d8411 100644
+--- a/src/tool_main.c
++++ b/src/tool_main.c
+@@ -59,6 +59,9 @@
+ static int vms_show = 0;
+ #endif
+ 
++/* if we build a static library for unit tests, there is no main() function */
++#ifndef UNITTESTS
++
+ /*
+  * Ensure that file descriptors 0, 1 and 2 (stdin, stdout, stderr) are
+  * open before starting to run.  Otherwise, the first three network
+@@ -128,3 +131,4 @@ int main(int argc, char *argv[])
+ #endif
+ }
+ 
++#endif /* ndef UNITTESTS */
+diff --git a/tests/unit/Makefile.am b/tests/unit/Makefile.am
+index 12d5fe3..ce6af6f 100644
+--- a/tests/unit/Makefile.am
++++ b/tests/unit/Makefile.am
+@@ -40,6 +40,7 @@ AM_CPPFLAGS = -I$(top_builddir)/include/curl \
+               -I$(top_srcdir)/include        \
+               -I$(top_builddir)/lib          \
+               -I$(top_srcdir)/lib            \
++              -I$(top_srcdir)/src            \
+               -I$(top_srcdir)/tests/libtest  \
+               -I$(top_builddir)/ares         \
+               -I$(top_srcdir)/ares
+@@ -49,6 +50,7 @@ AM_CPPFLAGS = -I$(top_builddir)/include/curl \
+               -I$(top_srcdir)/include        \
+               -I$(top_builddir)/lib          \
+               -I$(top_srcdir)/lib            \
++              -I$(top_srcdir)/src            \
+               -I$(top_srcdir)/tests/libtest
+ endif
+ 
+@@ -57,8 +59,13 @@ EXTRA_DIST = Makefile.inc
+ # Prevent LIBS from being used for all link targets
+ LIBS = $(BLANK_AT_MAKETIME)
+ 
+-LDADD = $(top_builddir)/lib/libcurlu.la @LDFLAGS@ @LIBCURL_LIBS@
+-DEPENDENCIES = $(top_builddir)/lib/libcurlu.la
++LDADD = $(top_builddir)/src/libcurltool.la   \
++        $(top_builddir)/lib/libcurlu.la      \
++        @LDFLAGS@ @LIBCURL_LIBS@
++
++DEPENDENCIES = $(top_builddir)/src/libcurltool.la \
++               $(top_builddir)/lib/libcurlu.la
++
+ AM_CPPFLAGS += -DUNITTESTS
+ 
+ # Mostly for Windows build targets, when using static libcurl
+-- 
+2.7.4
+
+
+From fb3618a22db456813a3064118e80a55ac2abb8c1 Mon Sep 17 00:00:00 2001
+From: Jared Jennings <jjenning@fastmail.fm>
+Date: Fri, 5 Apr 2013 16:01:31 +0200
+Subject: [PATCH 07/10] unit1394.c: basis of a unit test for
+ parse_cert_parameter()
+
+Upstream-commit: b045d079f8bf9e85b2aef94bc94928f444b3a711
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ tests/unit/unit1394.c | 75 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 75 insertions(+)
+ create mode 100644 tests/unit/unit1394.c
+
+diff --git a/tests/unit/unit1394.c b/tests/unit/unit1394.c
+new file mode 100644
+index 0000000..11a47b9
+--- /dev/null
++++ b/tests/unit/unit1394.c
+@@ -0,0 +1,75 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++int main(int argc, char **argv) {
++  char *values[] = {
++    /* -E parameter */        /* exp. cert name */  /* exp. passphrase */
++    "foo:bar:baz",            "foo",                "bar:baz",
++    "foo\\:bar:baz",          "foo:bar",            "baz",
++    "foo\\\\:bar:baz",        "foo\\",              "bar:baz",
++    "foo:bar\\:baz",          "foo",                "bar\\:baz",
++    "foo:bar\\\\:baz",        "foo",                "bar\\\\:baz",
++    "foo\\bar\\baz",          "foo\\bar\\baz",      NULL,
++    "foo\\\\bar\\\\baz",      "foo\\bar\\baz",      NULL,
++    "foo\\",                  "foo\\",              NULL,
++    "foo\\\\",                "foo\\",              NULL,
++    "foo:bar\\",              "foo",                "bar\\",
++    "foo:bar\\\\",            "foo",                "bar\\\\",
++    "foo:bar:",               "foo",                "bar:",
++    "foo\\::bar\\:",          "foo:",               "bar\\:",
++    "c:\\foo:bar:baz",        "c:\\foo",            "bar:baz",
++    "c:\\foo\\:bar:baz",      "c:\\foo:bar",        "baz",
++    "c:\\foo\\\\:bar:baz",    "c:\\foo\\",          "bar:baz",
++    "c:\\foo:bar\\:baz",      "c:\\foo",            "bar\\:baz",
++    "c:\\foo:bar\\\\:baz",    "c:\\foo",            "bar\\\\:baz",
++    "c:\\foo\\bar\\baz",      "c:\\foo\\bar\\baz",  NULL,
++    "c:\\foo\\\\bar\\\\baz",  "c:\\foo\\bar\\baz",  NULL,
++    "c:\\foo\\",              "c:\\foo\\",          NULL,
++    "c:\\foo\\\\",            "c:\\foo\\",          NULL,
++    "c:\\foo:bar\\",          "c:\\foo",            "bar\\",
++    "c:\\foo:bar\\\\",        "c:\\foo",            "bar\\\\",
++    "c:\\foo:bar:",           "c:\\foo",            "bar:",
++    "c:\\foo\\::bar\\:",      "c:\\foo:",           "bar\\:",
++    NULL,                     NULL,                 NULL,
++  };
++  char **p;
++  char *certname, *passphrase;
++  for(p = values; *p; p += 3) {
++    parse_cert_parameter(p[0], &certname, &passphrase);
++    if(p[1]) {
++      if(certname) {
++        if(strcmp(p[1], certname)) {
++          printf("expected certname '%s' but got '%s' "
++              "for -E param '%s'\n", p[1], certname, p[0]);
++        }
++      } else {
++        printf("expected certname '%s' but got NULL "
++            "for -E param '%s'\n", p[1], p[0]);
++      }
++    } else {
++      if(certname) {
++        printf("expected certname NULL but got '%s' "
++            "for -E param '%s'\n", certname, p[0]);
++      }
++    }
++    if(p[2]) {
++      if(passphrase) {
++        if(strcmp(p[2], passphrase)) {
++          printf("expected passphrase '%s' but got '%s'"
++              "for -E param '%s'\n", p[2], passphrase, p[0]);
++        }
++      } else {
++        printf("expected passphrase '%s' but got NULL "
++            "for -E param '%s'\n", p[2], p[0]);
++      }
++    } else {
++      if(passphrase) {
++        printf("expected passphrase NULL but got '%s' "
++            "for -E param '%s'\n", passphrase, p[0]);
++      }
++    }
++    if(certname) free(certname);
++    if(passphrase) free(passphrase);
++  }
++}
+-- 
+2.7.4
+
+
+From 2af1560a4b38c33089916cadfe7d8a8e8f44b7d3 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Fri, 3 May 2013 13:26:25 +0200
+Subject: [PATCH 08/10] unit1394.c: plug the curl tool unit test in
+
+Upstream-commit: bcf1b9dec13badd073518e1d63aab40a958d9245
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ src/tool_getparam.c     |  9 +++++---
+ src/tool_getparam.h     |  6 ++++++
+ tests/data/test1394     | 30 ++++++++++++++++++++++++++
+ tests/unit/Makefile.inc |  4 +++-
+ tests/unit/unit1394.c   | 56 +++++++++++++++++++++++++++++++++++++++++++++----
+ 5 files changed, 97 insertions(+), 8 deletions(-)
+ create mode 100644 tests/data/test1394
+
+diff --git a/src/tool_getparam.c b/src/tool_getparam.c
+index dd04f5f..33db742 100644
+--- a/src/tool_getparam.c
++++ b/src/tool_getparam.c
+@@ -294,9 +294,12 @@ static const struct feat feats[] = {
+  * We allow ':' and '\' to be escaped by '\' so that we can use certificate
+  * nicknames containing ':'.  See <https://sourceforge.net/p/curl/bugs/1196/>
+  * for details. */
+-static void parse_cert_parameter(const char *cert_parameter,
+-                                 char **certname,
+-                                 char **passphrase)
++#ifndef UNITTESTS
++static
++#endif
++void parse_cert_parameter(const char *cert_parameter,
++                          char **certname,
++                          char **passphrase)
+ {
+   size_t param_length = strlen(cert_parameter);
+   size_t span;
+diff --git a/src/tool_getparam.h b/src/tool_getparam.h
+index 38f0674..a86bfce 100644
+--- a/src/tool_getparam.h
++++ b/src/tool_getparam.h
+@@ -45,5 +45,11 @@ ParameterError getparameter(char *flag,
+                             bool *usedarg,
+                             struct Configurable *config);
+ 
++#ifdef UNITTESTS
++void parse_cert_parameter(const char *cert_parameter,
++                          char **certname,
++                          char **passphrase);
++#endif
++
+ #endif /* HEADER_CURL_TOOL_GETPARAM_H */
+ 
+diff --git a/tests/data/test1394 b/tests/data/test1394
+new file mode 100644
+index 0000000..34d4a0e
+--- /dev/null
++++ b/tests/data/test1394
+@@ -0,0 +1,30 @@
++<testcase>
++<info>
++<keywords>
++unittest
++</keywords>
++</info>
++
++#
++# Client-side
++<client>
++<server>
++none
++</server>
++<features>
++unittest
++</features>
++ <name>
++unit test for parse_cert_parameter()
++ </name>
++<tool>
++unit1394
++</tool>
++</client>
++
++<verify>
++<stdout mode="text">
++</stdout>
++</verify>
++
++</testcase>
+diff --git a/tests/unit/Makefile.inc b/tests/unit/Makefile.inc
+index 20835d7..4490095 100644
+--- a/tests/unit/Makefile.inc
++++ b/tests/unit/Makefile.inc
+@@ -6,7 +6,7 @@ UNITFILES = curlcheck.h \
+ 
+ # These are all unit test programs
+ UNITPROGS = unit1300 unit1301 unit1302 unit1303 unit1304 unit1305 unit1307 \
+- unit1308 unit1309
++ unit1308 unit1309 unit1394
+ 
+ unit1300_SOURCES = unit1300.c $(UNITFILES)
+ unit1300_CPPFLAGS = $(AM_CPPFLAGS)
+@@ -35,3 +35,5 @@ unit1308_CPPFLAGS = $(AM_CPPFLAGS)
+ unit1309_SOURCES = unit1309.c $(UNITFILES)
+ unit1309_CPPFLAGS = $(AM_CPPFLAGS)
+ 
++unit1394_SOURCES = unit1394.c $(UNITFILES)
++unit1394_CPPFLAGS = $(AM_CPPFLAGS)
+diff --git a/tests/unit/unit1394.c b/tests/unit/unit1394.c
+index 11a47b9..d25e4f5 100644
+--- a/tests/unit/unit1394.c
++++ b/tests/unit/unit1394.c
+@@ -1,9 +1,48 @@
++/***************************************************************************
++ *                                  _   _ ____  _
++ *  Project                     ___| | | |  _ \| |
++ *                             / __| | | | |_) | |
++ *                            | (__| |_| |  _ <| |___
++ *                             \___|\___/|_| \_\_____|
++ *
++ * Copyright (C) 1998 - 2013, Daniel Stenberg, <daniel@haxx.se>, et al.
++ *
++ * This software is licensed as described in the file COPYING, which
++ * you should have received as part of this distribution. The terms
++ * are also available at http://curl.haxx.se/docs/copyright.html.
++ *
++ * You may opt to use, copy, modify, merge, publish, distribute and/or sell
++ * copies of the Software, and permit persons to whom the Software is
++ * furnished to do so, under the terms of the COPYING file.
++ *
++ * This software is distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY
++ * KIND, either express or implied.
++ *
++ ***************************************************************************/
++#include "curlcheck.h"
++
++#include "tool_getparam.h"
++
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
+-int main(int argc, char **argv) {
+-  char *values[] = {
++#include "curl_memory.h"
++#include "memdebug.h" /* LAST include file */
++
++static CURLcode unit_setup(void)
++{
++  return CURLE_OK;
++}
++
++static void unit_stop(void)
++{
++
++}
++
++UNITTEST_START
++
++  const char *values[] = {
+     /* -E parameter */        /* exp. cert name */  /* exp. passphrase */
+     "foo:bar:baz",            "foo",                "bar:baz",
+     "foo\\:bar:baz",          "foo:bar",            "baz",
+@@ -18,6 +57,7 @@ int main(int argc, char **argv) {
+     "foo:bar\\\\",            "foo",                "bar\\\\",
+     "foo:bar:",               "foo",                "bar:",
+     "foo\\::bar\\:",          "foo:",               "bar\\:",
++#ifdef WIN32
+     "c:\\foo:bar:baz",        "c:\\foo",            "bar:baz",
+     "c:\\foo\\:bar:baz",      "c:\\foo:bar",        "baz",
+     "c:\\foo\\\\:bar:baz",    "c:\\foo\\",          "bar:baz",
+@@ -31,9 +71,10 @@ int main(int argc, char **argv) {
+     "c:\\foo:bar\\\\",        "c:\\foo",            "bar\\\\",
+     "c:\\foo:bar:",           "c:\\foo",            "bar:",
+     "c:\\foo\\::bar\\:",      "c:\\foo:",           "bar\\:",
++#endif
+     NULL,                     NULL,                 NULL,
+   };
+-  char **p;
++  const char **p;
+   char *certname, *passphrase;
+   for(p = values; *p; p += 3) {
+     parse_cert_parameter(p[0], &certname, &passphrase);
+@@ -42,15 +83,18 @@ int main(int argc, char **argv) {
+         if(strcmp(p[1], certname)) {
+           printf("expected certname '%s' but got '%s' "
+               "for -E param '%s'\n", p[1], certname, p[0]);
++          fail("assertion failure");
+         }
+       } else {
+         printf("expected certname '%s' but got NULL "
+             "for -E param '%s'\n", p[1], p[0]);
++        fail("assertion failure");
+       }
+     } else {
+       if(certname) {
+         printf("expected certname NULL but got '%s' "
+             "for -E param '%s'\n", certname, p[0]);
++        fail("assertion failure");
+       }
+     }
+     if(p[2]) {
+@@ -58,18 +102,22 @@ int main(int argc, char **argv) {
+         if(strcmp(p[2], passphrase)) {
+           printf("expected passphrase '%s' but got '%s'"
+               "for -E param '%s'\n", p[2], passphrase, p[0]);
++          fail("assertion failure");
+         }
+       } else {
+         printf("expected passphrase '%s' but got NULL "
+             "for -E param '%s'\n", p[2], p[0]);
++        fail("assertion failure");
+       }
+     } else {
+       if(passphrase) {
+         printf("expected passphrase NULL but got '%s' "
+             "for -E param '%s'\n", passphrase, p[0]);
++        fail("assertion failure");
+       }
+     }
+     if(certname) free(certname);
+     if(passphrase) free(passphrase);
+   }
+-}
++
++UNITTEST_STOP
+-- 
+2.7.4
+
+
+From fc2acbf743634f400efb8ec84748eed7267ead15 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Sun, 19 May 2013 12:44:44 +0200
+Subject: [PATCH 09/10] tests: add test1394 file to the tarball
+
+Upstream-commit: fc4759af9d9cbc7635af0da68c28672a4bbf35ff
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ tests/data/Makefile.am | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tests/data/Makefile.am b/tests/data/Makefile.am
+index 35bc6eb..3b31581 100644
+--- a/tests/data/Makefile.am
++++ b/tests/data/Makefile.am
+@@ -90,7 +90,7 @@ test1355 test1356 test1357 test1358 test1359 test1360 test1361 test1362 \
+ test1363 test1364 test1365 test1366 test1367 test1368 test1369 test1370 \
+ test1371 test1372 test1373 test1374 test1375 test1376 test1377 test1378 \
+ test1379 test1380 test1381 test1382 test1383 test1384 test1385 test1386 \
+-test1387 test1388 test1389 test1390 test1391 test1392 test1393 \
++test1387 test1388 test1389 test1390 test1391 test1392 test1393 test1394 \
+ test1400 test1401 test1402 test1403 test1404 test1405 test1406 test1407 \
+ test1408 test1409 test1410 test1411 test1412 test1413 test1415 \
+ test1435 test1436 \
+-- 
+2.7.4
+
+
+From c4fe8629b69e4d5d642d3833a0208b2f65258d31 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Thu, 29 Aug 2013 12:50:15 +0200
+Subject: [PATCH 10/10] unit1304: include memdebug and free everything
+ correctly
+
+Upstream-commit: d737aa19c89f12c1415637a60afc79a6ea9c649f
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ tests/unit/unit1304.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/tests/unit/unit1304.c b/tests/unit/unit1304.c
+index 9242e80..dcd8fa7 100644
+--- a/tests/unit/unit1304.c
++++ b/tests/unit/unit1304.c
+@@ -5,7 +5,7 @@
+  *                            | (__| |_| |  _ <| |___
+  *                             \___|\___/|_| \_\_____|
+  *
+- * Copyright (C) 1998 - 2011, Daniel Stenberg, <daniel@haxx.se>, et al.
++ * Copyright (C) 1998 - 2013, Daniel Stenberg, <daniel@haxx.se>, et al.
+  *
+  * This software is licensed as described in the file COPYING, which
+  * you should have received as part of this distribution. The terms
+@@ -20,8 +20,8 @@
+  *
+  ***************************************************************************/
+ #include "curlcheck.h"
+-
+ #include "netrc.h"
++#include "memdebug.h" /* LAST include file */
+ 
+ static char *login;
+ static char *password;
+@@ -144,6 +144,9 @@ UNITTEST_START
+               "password should be 'none'");
+   fail_unless(strncmp(login, "none", 4) == 0, "login should be 'none'");
+ 
++  free(login);
++  free(password);
++
+   /* TODO:
+    * Test over the size limit password / login!
+    * Test files with a bad format
+-- 
+2.7.4
+
