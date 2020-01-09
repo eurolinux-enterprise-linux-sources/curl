@@ -1,7 +1,7 @@
 Summary: A utility for getting files from remote servers (FTP, HTTP, and others)
 Name: curl
 Version: 7.19.7
-Release: 40%{?dist}.3
+Release: 40%{?dist}.4
 License: MIT
 Group: Applications/Internet
 Source: http://curl.haxx.se/download/%{name}-%{version}.tar.lzma
@@ -58,6 +58,7 @@ Patch231: curl-7.19.7-bz799557.patch
 Patch232: curl-7.19.7-CVE-2014-0015.patch
 Patch233: curl-7.19.7-CVE-2014-0138.patch
 Patch234: curl-7.19.7-bz1154663.patch
+Patch240: curl-7.19.7-bz1008178.patch
 Patch250: curl-7.19.7-bz1168137.patch
 Patch251: curl-7.19.7-bz1168668.patch
 Provides: webclient
@@ -269,6 +270,9 @@ use cURL's capabilities internally.
 # bz #1154663
 %patch234 -p1
 
+# bz #1008178
+%patch240 -p1
+
 # bz #1168137
 %patch250 -p1
 
@@ -298,6 +302,11 @@ for f in CHANGES README; do
 	iconv -f iso-8859-1 -t utf8 < ${f} > ${f}.utf8
 	mv -f ${f}.utf8 ${f}
 done
+
+# disable test 303 on ppc/ppc64 (it times out occasionally)
+%ifarch ppc ppc64
+echo "303" >> tests/data/DISABLED
+%endif
 
 %build
 %configure --without-ssl --with-nss --enable-ipv6 \
@@ -381,6 +390,9 @@ rm -rf $RPM_BUILD_ROOT
 %{_datadir}/aclocal/libcurl.m4
 
 %changelog
+* Thu Jan 15 2015 Kamil Dudka <kdudka@redhat.com> 7.19.7-40.el6_6.4
+- do not crash if MD5 fingerprint is not provided by libssh2 (#1008178)
+
 * Mon Dec 01 2014 Kamil Dudka <kdudka@redhat.com> 7.19.7-40.el6_6.3
 - fix occasional SIGSEGV during SSL handshake (#1169357)
 
