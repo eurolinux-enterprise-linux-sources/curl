@@ -1,7 +1,7 @@
 Summary: A utility for getting files from remote servers (FTP, HTTP, and others)
 Name: curl
 Version: 7.19.7
-Release: 40%{?dist}.4
+Release: 46%{?dist}
 License: MIT
 Group: Applications/Internet
 Source: http://curl.haxx.se/download/%{name}-%{version}.tar.lzma
@@ -58,9 +58,30 @@ Patch231: curl-7.19.7-bz799557.patch
 Patch232: curl-7.19.7-CVE-2014-0015.patch
 Patch233: curl-7.19.7-CVE-2014-0138.patch
 Patch234: curl-7.19.7-bz1154663.patch
+Patch235: curl-7.19.7-bz896544.patch
+Patch236: curl-7.19.7-bz905066.patch
+Patch237: curl-7.19.7-bz835898.patch
+Patch238: curl-7.19.7-bz883002.patch
+Patch239: curl-7.19.7-bz997185.patch
 Patch240: curl-7.19.7-bz1008178.patch
+Patch241: curl-7.19.7-bz1009455.patch
+Patch242: curl-7.19.7-bz1012136.patch
+Patch243: curl-7.19.7-bz1104160.patch
+Patch244: curl-7.19.7-bz1058767.patch
+Patch245: curl-7.19.7-bz1120196.patch
+Patch246: curl-7.19.7-bz1146528.patch
+Patch247: curl-7.19.7-bz1154747.patch
+Patch248: curl-7.19.7-bz1156422.patch
+Patch249: curl-7.19.7-bz1161163.patch
 Patch250: curl-7.19.7-bz1168137.patch
 Patch251: curl-7.19.7-bz1168668.patch
+Patch252: curl-7.19.7-bz1154059.patch
+Patch253: curl-7.19.7-test303-timeout.patch
+Patch254: curl-7.19.7-CVE-2014-3613.patch
+Patch255: curl-7.19.7-CVE-2014-3707.patch
+Patch256: curl-7.19.7-CVE-2014-8150.patch
+Patch257: curl-7.19.7-CVE-2015-3143.patch
+Patch258: curl-7.19.7-CVE-2015-3148.patch
 Provides: webclient
 URL: http://curl.haxx.se/
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
@@ -270,14 +291,77 @@ use cURL's capabilities internally.
 # bz #1154663
 %patch234 -p1
 
+# bz #1011101
+%patch235 -p1
+
+# bz #1011083
+%patch236 -p1
+
+# bz #835898
+%patch237 -p1
+
+# bz #883002
+%patch238 -p1
+
+# bz #997185
+%patch239 -p1
+
 # bz #1008178
 %patch240 -p1
+
+# bz #1009455
+%patch241 -p1
+
+# bz #1012136
+%patch242 -p1
+
+# bz #1104160
+%patch243 -p1
+
+# bz #1058767
+%patch244 -p1
+
+# bz #1120196
+%patch245 -p1
+
+# bz #1146528
+%patch246 -p1
+
+# bz #1154747
+%patch247 -p1
+
+# bz #1156422
+%patch248 -p1
+
+# bz #1161163
+%patch249 -p1
 
 # bz #1168137
 %patch250 -p1
 
 # bz #1168668
 %patch251 -p1
+
+# bz #1154059
+%patch252 -p1
+
+# prevent test303 from timing out on ppc occasionally
+%patch253 -p1
+
+# CVE-2014-3613
+%patch254 -p1
+
+# CVE-2014-3707
+%patch255 -p1
+
+# reject CRLFs in URLs passed to proxy (CVE-2014-8150)
+%patch256 -p1
+
+# require credentials to match for NTLM re-use (CVE-2015-3143)
+%patch257 -p1
+
+# close Negotiate connections when done (CVE-2015-3148)
+%patch258 -p1
 
 # run aclocal since we are going to run automake
 aclocal -I m4
@@ -390,16 +474,40 @@ rm -rf $RPM_BUILD_ROOT
 %{_datadir}/aclocal/libcurl.m4
 
 %changelog
-* Thu Jan 15 2015 Kamil Dudka <kdudka@redhat.com> 7.19.7-40.el6_6.4
+* Mon Apr 27 2015 Kamil Dudka <kdudka@redhat.com> 7.19.7-46
+- require credentials to match for NTLM re-use (CVE-2015-3143)
+- close Negotiate connections when done (CVE-2015-3148)
+
+* Thu Jan 08 2015 Kamil Dudka <kdudka@redhat.com> 7.19.7-45
+- reject CRLFs in URLs passed to proxy (CVE-2014-8150)
+
+* Mon Dec 22 2014 Kamil Dudka <kdudka@redhat.com> 7.19.7-44
+- use only full matches for hosts used as IP address in cookies (CVE-2014-3613)
+- fix handling of CURLOPT_COPYPOSTFIELDS in curl_easy_duphandle (CVE-2014-3707)
+
+* Mon Dec 01 2014 Kamil Dudka <kdudka@redhat.com> 7.19.7-43
+- fix manpage typos found using aspell (#1011101)
+- fix comments about loading CA certs with NSS in man pages (#1011083)
+- fix handling of DNS cache timeout while a transfer is in progress (#835898)
+- eliminate unnecessary inotify events on upload via file protocol (#883002)
+- use correct socket type in the examples (#997185)
 - do not crash if MD5 fingerprint is not provided by libssh2 (#1008178)
+- fix SIGSEGV of curl --retry when network is down (#1009455)
+- allow to use TLS 1.1 and TLS 1.2 (#1012136)
+- docs: update the links to cipher-suites supported by NSS (#1104160)
+- allow to use ECC ciphers if NSS implements them (#1058767)
+- make curl --trace-time print correct time (#1120196)
+- let tool call PR_Cleanup() on exit if NSPR is used (#1146528)
+- ignore CURLOPT_FORBID_REUSE during NTLM HTTP auth (#1154747)
+- allow to enable/disable new AES cipher-suites (#1156422)
+- include response headers added by proxy in CURLINFO_HEADER_SIZE (#1161163)
+- disable libcurl-level downgrade to SSLv3 (#1154059)
 
-* Mon Dec 01 2014 Kamil Dudka <kdudka@redhat.com> 7.19.7-40.el6_6.3
-- fix occasional SIGSEGV during SSL handshake (#1169357)
-
-* Wed Nov 26 2014 Kamil Dudka <kdudka@redhat.com> 7.19.7-40.el6_6.2
+* Wed Nov 26 2014 Kamil Dudka <kdudka@redhat.com> 7.19.7-42
 - do not force connection close after failed HEAD request (#1168137)
+- fix occasional SIGSEGV during SSL handshake (#1168668)
 
-* Tue Oct 21 2014 Kamil Dudka <kdudka@redhat.com> 7.19.7-40.el6_6.1
+* Tue Oct 21 2014 Kamil Dudka <kdudka@redhat.com> 7.19.7-41
 - fix a connection failure when FTPS handle is reused (#1154663)
 
 * Mon May 19 2014 Kamil Dudka <kdudka@redhat.com> 7.19.7-40
