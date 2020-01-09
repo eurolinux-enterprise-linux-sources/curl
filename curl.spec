@@ -1,7 +1,7 @@
 Summary: A utility for getting files from remote servers (FTP, HTTP, and others)
 Name: curl
 Version: 7.19.7
-Release: 52%{?dist}
+Release: 53%{?dist}
 License: MIT
 Group: Applications/Internet
 Source: http://curl.haxx.se/download/%{name}-%{version}.tar.lzma
@@ -498,6 +498,9 @@ rm -rf $RPM_BUILD_ROOT
 %{_datadir}/aclocal/libcurl.m4
 
 %changelog
+* Tue Mar 07 2017 Kamil Dudka <kdudka@redhat.com> 7.19.7-53
+- treat Negotiate authentication as connection-oriented (CVE-2017-2628)
+
 * Fri Jan 29 2016 Kamil Dudka <kdudka@redhat.com> 7.19.7-52
 - fix a bug in DNS caching code that causes a memory leak (#1302893)
 
