@@ -1,0 +1,130 @@
+From db83e8719d76159cd87b398c81e7d07ef9b96e8c Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Thu, 27 Nov 2014 16:13:46 +0100
+Subject: [PATCH 1/2] nss: avoid breaking non-blocking handshake state machine
+
+... in case SSLv3 fallback is initiated
+---
+ lib/nss.c | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/lib/nss.c b/lib/nss.c
+index 71a592c..447f119 100644
+--- a/lib/nss.c
++++ b/lib/nss.c
+@@ -1211,7 +1211,7 @@ static CURLcode nss_load_ca_certificates(struct connectdata *conn,
+ 
+ static CURLcode nss_fail_connect(struct ssl_connect_data *connssl,
+                                  struct SessionHandle *data,
+-                                 CURLcode curlerr)
++                                 CURLcode curlerr, bool enable_fallback)
+ {
+   const PRErrorCode err = PR_GetError();
+   PRBool ssl3, tls1;
+@@ -1227,7 +1227,8 @@ static CURLcode nss_fail_connect(struct ssl_connect_data *connssl,
+   connssl->obj_list = NULL;
+ #endif
+ 
+-  if((SSL_OptionGet(connssl->handle, SSL_ENABLE_SSL3, &ssl3) == SECSuccess)
++  if(enable_fallback
++      && (SSL_OptionGet(connssl->handle, SSL_ENABLE_SSL3, &ssl3) == SECSuccess)
+       && (SSL_OptionGet(connssl->handle, SSL_ENABLE_TLS, &tls1) == SECSuccess)
+       && ssl3 && tls1 && isTLSIntoleranceError(err)) {
+     /* schedule reconnect through Curl_retry_request() */
+@@ -1248,7 +1249,8 @@ static CURLcode nss_set_nonblock(struct ssl_connect_data *connssl,
+   sock_opt.value.non_blocking = PR_TRUE;
+ 
+   if(PR_SetSocketOption(connssl->handle, &sock_opt) != PR_SUCCESS)
+-    return nss_fail_connect(connssl, data, CURLE_SSL_CONNECT_ERROR);
++    return nss_fail_connect(connssl, data, CURLE_SSL_CONNECT_ERROR,
++        /* enable_fallback */ FALSE);
+ 
+   return CURLE_OK;
+ }
+@@ -1492,7 +1494,7 @@ error:
+   if(model)
+     PR_Close(model);
+ 
+-  return nss_fail_connect(connssl, data, curlerr);
++  return nss_fail_connect(connssl, data, curlerr, /* enable_fallback */ FALSE);
+ }
+ 
+ static CURLcode nss_do_connect(struct connectdata *conn, int sockindex)
+@@ -1501,6 +1503,7 @@ static CURLcode nss_do_connect(struct connectdata *conn, int sockindex)
+   struct SessionHandle *data = conn->data;
+   CURLcode curlerr = CURLE_SSL_CONNECT_ERROR;
+   PRUint32 timeout;
++  bool enable_fallback = FALSE;
+ 
+   /* check timeout situation */
+   const long time_left = Curl_timeleft(conn, NULL, TRUE);
+@@ -1512,6 +1515,7 @@ static CURLcode nss_do_connect(struct connectdata *conn, int sockindex)
+   /* Force the handshake now */
+   timeout = PR_MillisecondsToInterval((PRUint32) time_left);
+   if(SSL_ForceHandshakeWithTimeout(connssl->handle, timeout) != SECSuccess) {
++    enable_fallback = TRUE;
+     if(PR_GetError() == PR_WOULD_BLOCK_ERROR)
+       /* blocking direction is updated by nss_update_connecting_state() */
+       return CURLE_AGAIN;
+@@ -1546,7 +1550,7 @@ static CURLcode nss_do_connect(struct connectdata *conn, int sockindex)
+   return CURLE_OK;
+ 
+ error:
+-  return nss_fail_connect(connssl, data, curlerr);
++  return nss_fail_connect(connssl, data, curlerr, enable_fallback);
+ }
+ 
+ static CURLcode nss_connect_common(struct connectdata *conn, int sockindex,
+@@ -1589,6 +1593,9 @@ static CURLcode nss_connect_common(struct connectdata *conn, int sockindex,
+     return rv;
+   }
+ 
++  if(data->state.ssl_connect_retry)
++    goto retry;
++
+   if(blocking) {
+     /* in blocking mode, set NSS non-blocking mode _after_ SSL handshake */
+     rv = nss_set_nonblock(connssl, data);
+@@ -1601,6 +1608,7 @@ static CURLcode nss_connect_common(struct connectdata *conn, int sockindex,
+ 
+   connssl->state = ssl_connection_complete;
+ 
++retry:
+   /* ssl_connect_done is never used outside, go back to the initial state */
+   connssl->connecting_state = ssl_connect_1;
+   return CURLE_OK;
+-- 
+2.1.0
+
+
+From 564b023d4041fc07c845d2953a276eacd00148d4 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Fri, 28 Nov 2014 10:44:53 +0100
+Subject: [PATCH 2/2] avoid underflow of unsigned integer in showit()
+
+Bug: http://sourceforge.net/p/curl/bugs/1104/
+---
+ lib/sendf.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/lib/sendf.c b/lib/sendf.c
+index 60ad99b..3049d94 100644
+--- a/lib/sendf.c
++++ b/lib/sendf.c
+@@ -598,7 +598,13 @@ static int showit(struct SessionHandle *data, curl_infotype type,
+ #ifdef CURL_DOES_CONVERSIONS
+   char buf[BUFSIZE+1];
+   size_t conv_size = 0;
++#endif
++
++  if(!size)
++    /* nothing to show actually --> avoid underflow of unsigned type */
++    return 0;
+ 
++#ifdef CURL_DOES_CONVERSIONS
+   switch(type) {
+   case CURLINFO_HEADER_OUT:
+     /* assume output headers are ASCII */
+-- 
+2.1.0
+
