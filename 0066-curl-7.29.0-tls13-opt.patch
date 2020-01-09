@@ -1,0 +1,704 @@
+From 0c36569c6541ed1eb924ccd60dea5caca0d1e957 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Thu, 27 Oct 2016 14:57:11 +0200
+Subject: [PATCH 1/5] vtls: support TLS 1.3 via CURL_SSLVERSION_TLSv1_3
+
+Fully implemented with the NSS backend only for now.
+
+Reviewed-by: Ray Satiro
+
+Upstream-commit: 6ad3add60654182a747f5971afb40817488ef0e8
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/libcurl/curl_easy_setopt.3  | 2 ++
+ docs/libcurl/symbols-in-versions | 1 +
+ include/curl/curl.h              | 1 +
+ lib/nss.c                        | 8 ++++++++
+ packages/OS400/curl.inc.in       | 2 ++
+ 5 files changed, 14 insertions(+)
+
+diff --git a/docs/libcurl/curl_easy_setopt.3 b/docs/libcurl/curl_easy_setopt.3
+index 17b632f..226e0ca 100644
+--- a/docs/libcurl/curl_easy_setopt.3
++++ b/docs/libcurl/curl_easy_setopt.3
+@@ -2262,6 +2262,8 @@ Force TLSv1.0 (Added in 7.34.0)
+ Force TLSv1.1 (Added in 7.34.0)
+ .IP CURL_SSLVERSION_TLSv1_2
+ Force TLSv1.2 (Added in 7.34.0)
++.IP CURL_SSLVERSION_TLSv1_3
++Force TLSv1.3 (Added in 7.51.1)
+ .RE
+ .IP CURLOPT_SSL_VERIFYPEER
+ Pass a long as parameter. By default, curl assumes a value of 1.
+diff --git a/docs/libcurl/symbols-in-versions b/docs/libcurl/symbols-in-versions
+index e2cce4c..a66bd97 100644
+--- a/docs/libcurl/symbols-in-versions
++++ b/docs/libcurl/symbols-in-versions
+@@ -685,6 +685,7 @@ CURL_SSLVERSION_TLSv1           7.9.2
+ CURL_SSLVERSION_TLSv1_0         7.34.0
+ CURL_SSLVERSION_TLSv1_1         7.34.0
+ CURL_SSLVERSION_TLSv1_2         7.34.0
++CURL_SSLVERSION_TLSv1_3         7.51.1
+ CURL_TIMECOND_IFMODSINCE        7.9.7
+ CURL_TIMECOND_IFUNMODSINCE      7.9.7
+ CURL_TIMECOND_LASTMOD           7.9.7
+diff --git a/include/curl/curl.h b/include/curl/curl.h
+index 8b639fa..0fb1885 100644
+--- a/include/curl/curl.h
++++ b/include/curl/curl.h
+@@ -1645,6 +1645,7 @@ enum {
+   CURL_SSLVERSION_TLSv1_0,
+   CURL_SSLVERSION_TLSv1_1,
+   CURL_SSLVERSION_TLSv1_2,
++  CURL_SSLVERSION_TLSv1_3,
+ 
+   CURL_SSLVERSION_LAST /* never use, keep last */
+ };
+diff --git a/lib/nss.c b/lib/nss.c
+index 31e5d75..8e26d1f 100644
+--- a/lib/nss.c
++++ b/lib/nss.c
+@@ -1331,6 +1331,14 @@ static CURLcode nss_init_sslver(SSLVersionRange *sslver,
+     sslver->min = SSL_LIBRARY_VERSION_TLS_1_2;
+     sslver->max = SSL_LIBRARY_VERSION_TLS_1_2;
+     return CURLE_OK;
++#endif
++    break;
++
++  case CURL_SSLVERSION_TLSv1_3:
++#ifdef SSL_LIBRARY_VERSION_TLS_1_3
++    sslver->min = SSL_LIBRARY_VERSION_TLS_1_3;
++    sslver->max = SSL_LIBRARY_VERSION_TLS_1_3;
++    return CURLE_OK;
+ #endif
+     break;
+   }
+diff --git a/packages/OS400/curl.inc.in b/packages/OS400/curl.inc.in
+index 22a5511..30e6506 100644
+--- a/packages/OS400/curl.inc.in
++++ b/packages/OS400/curl.inc.in
+@@ -232,6 +232,8 @@
+      d                 c                   5
+      d CURL_SSLVERSION_TLSv1_2...
+      d                 c                   6
++     d CURL_SSLVERSION_TLSv1_3...
++     d                 c                   7
+       *
+      d CURL_TLSAUTH_NONE...
+      d                 c                   0
+-- 
+2.17.2
+
+
+From d18da081cc26df5605b5a2995615660eb3270712 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Thu, 27 Oct 2016 14:58:43 +0200
+Subject: [PATCH 2/5] curl: introduce the --tlsv1.3 option to force TLS 1.3
+
+Fully implemented with the NSS backend only for now.
+
+Reviewed-by: Ray Satiro
+
+Upstream-commit: a110a03b43057879643046538c79cc9dd20d399a
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/curl.1         | 10 +++++++---
+ src/tool_getparam.c |  5 +++++
+ src/tool_help.c     |  1 +
+ src/tool_setopt.c   |  1 +
+ 4 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/docs/curl.1 b/docs/curl.1
+index a26b03c..0c5ed9a 100644
+--- a/docs/curl.1
++++ b/docs/curl.1
+@@ -118,9 +118,9 @@ internally preferred: HTTP 1.1.
+ .IP "-1, --tlsv1"
+ (SSL)
+ Forces curl to use TLS version 1.x when negotiating with a remote TLS server.
+-You can use options \fI--tlsv1.0\fP, \fI--tlsv1.1\fP, and \fI--tlsv1.2\fP to
+-control the TLS version more precisely (if the SSL backend in use supports such
+-a level of control).
++You can use options \fI--tlsv1.0\fP, \fI--tlsv1.1\fP, \fI--tlsv1.2\fP, and
++\fI--tlsv1.3\fP to control the TLS version more precisely (if the SSL backend
++in use supports such a level of control).
+ .IP "-2, --sslv2"
+ (SSL)
+ Forces curl to use SSL version 2 when negotiating with a remote SSL server.
+@@ -1469,6 +1469,10 @@ Forces curl to use TLS version 1.1 when negotiating with a remote TLS server.
+ (SSL)
+ Forces curl to use TLS version 1.2 when negotiating with a remote TLS server.
+ (Added in 7.34.0)
++.IP "--tlsv1.3"
++(SSL)
++Forces curl to use TLS version 1.3 when negotiating with a remote TLS server.
++(Added in 7.51.1)
+ .IP "--tr-encoding"
+ (HTTP) Request a compressed Transfer-Encoding response using one of the
+ algorithms curl supports, and uncompress the data while receiving it.
+diff --git a/src/tool_getparam.c b/src/tool_getparam.c
+index 32fc68b..86a7bb6 100644
+--- a/src/tool_getparam.c
++++ b/src/tool_getparam.c
+@@ -179,6 +179,7 @@ static const struct LongShort aliases[]= {
+   {"10",  "tlsv1.0",                 FALSE},
+   {"11",  "tlsv1.1",                 FALSE},
+   {"12",  "tlsv1.2",                 FALSE},
++  {"13",  "tlsv1.3",                 FALSE},
+   {"2",  "sslv2",                    FALSE},
+   {"3",  "sslv3",                    FALSE},
+   {"4",  "ipv4",                     FALSE},
+@@ -1000,6 +1001,10 @@ ParameterError getparameter(char *flag,    /* f or -long-flag */
+         /* TLS version 1.2 */
+         config->ssl_version = CURL_SSLVERSION_TLSv1_2;
+         break;
++      case '3':
++        /* TLS version 1.3 */
++        config->ssl_version = CURL_SSLVERSION_TLSv1_3;
++        break;
+       }
+       break;
+     case '2':
+diff --git a/src/tool_help.c b/src/tool_help.c
+index c2883eb..0659db6 100644
+--- a/src/tool_help.c
++++ b/src/tool_help.c
+@@ -205,6 +205,7 @@ static const char *const helptext[] = {
+   "     --tlsv1.0       Use TLSv1.0 (SSL)",
+   "     --tlsv1.1       Use TLSv1.1 (SSL)",
+   "     --tlsv1.2       Use TLSv1.2 (SSL)",
++  "     --tlsv1.3       Use TLSv1.3 (SSL)",
+   "     --trace FILE    Write a debug trace to the given file",
+   "     --trace-ascii FILE  Like --trace but without the hex output",
+   "     --trace-time    Add time stamps to trace/verbose output",
+diff --git a/src/tool_setopt.c b/src/tool_setopt.c
+index 5ae32cd..0534118 100644
+--- a/src/tool_setopt.c
++++ b/src/tool_setopt.c
+@@ -81,6 +81,7 @@ const NameValue setopt_nv_CURL_SSLVERSION[] = {
+   NV(CURL_SSLVERSION_TLSv1_0),
+   NV(CURL_SSLVERSION_TLSv1_1),
+   NV(CURL_SSLVERSION_TLSv1_2),
++  NV(CURL_SSLVERSION_TLSv1_3),
+   NVEND,
+ };
+ 
+-- 
+2.17.2
+
+
+From 6ffdc6a1ca867c0ed228ffba172cb910b77011f0 Mon Sep 17 00:00:00 2001
+From: Jozef Kralik <jozef.kralik@eset.sk>
+Date: Tue, 13 Dec 2016 21:10:00 +0100
+Subject: [PATCH 3/5] vtls: add options to specify range of enabled TLS
+ versions
+
+This commit introduces the CURL_SSLVERSION_MAX_* constants as well as
+the --tls-max option of the curl tool.
+
+Closes https://github.com/curl/curl/pull/1166
+
+Upstream-commit: 6448f98c1857de521fb2dd3f9d4e5659845b5474
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/curl.1                      | 21 ++++++-
+ docs/libcurl/curl_easy_setopt.3  | 18 +++++-
+ docs/libcurl/symbols-in-versions |  8 ++-
+ include/curl/curl.h              | 12 ++++
+ lib/nss.c                        | 94 ++++++++++++++++++++++----------
+ lib/sslgen.c                     |  2 +
+ lib/url.c                        |  7 ++-
+ lib/urldata.h                    |  1 +
+ src/tool_cfgable.h               |  1 +
+ src/tool_getparam.c              |  6 ++
+ src/tool_help.c                  |  1 +
+ src/tool_operate.c               |  3 +-
+ src/tool_paramhlp.c              | 32 +++++++++++
+ src/tool_paramhlp.h              |  2 +
+ 14 files changed, 175 insertions(+), 33 deletions(-)
+
+diff --git a/docs/curl.1 b/docs/curl.1
+index 0c5ed9a..35fae14 100644
+--- a/docs/curl.1
++++ b/docs/curl.1
+@@ -1472,7 +1472,26 @@ Forces curl to use TLS version 1.2 when negotiating with a remote TLS server.
+ .IP "--tlsv1.3"
+ (SSL)
+ Forces curl to use TLS version 1.3 when negotiating with a remote TLS server.
+-(Added in 7.51.1)
++(Added in 7.52.0)
++.IP "--tls-max <VERSION>"
++(SSL) VERSION defines maximum supported TLS version. The minimum acceptable version
++is set by tlsv1.0, tlsv1.1, tlsv1.2 or tlsv1.3.
++
++.RS
++.IP "default"
++Use up to recommended TLS version.
++.IP "1.0"
++Use up to TLSv1.0.
++.IP "1.1"
++Use up to TLSv1.1.
++.IP "1.2"
++Use up to TLSv1.2.
++.IP "1.3"
++Use up to TLSv1.3.
++.RE
++
++See also \fI--tlsv1.0\fP and \fI--tlsv1.1\fP and \fI--tlsv1.2\fP and
++\fI--tlsv1.3\fP.  Added in 7.54.0.
+ .IP "--tr-encoding"
+ (HTTP) Request a compressed Transfer-Encoding response using one of the
+ algorithms curl supports, and uncompress the data while receiving it.
+diff --git a/docs/libcurl/curl_easy_setopt.3 b/docs/libcurl/curl_easy_setopt.3
+index 226e0ca..55d207e 100644
+--- a/docs/libcurl/curl_easy_setopt.3
++++ b/docs/libcurl/curl_easy_setopt.3
+@@ -2263,7 +2263,23 @@ Force TLSv1.1 (Added in 7.34.0)
+ .IP CURL_SSLVERSION_TLSv1_2
+ Force TLSv1.2 (Added in 7.34.0)
+ .IP CURL_SSLVERSION_TLSv1_3
+-Force TLSv1.3 (Added in 7.51.1)
++Force TLSv1.3 (Added in 7.52.0)
++.IP CURL_SSLVERSION_MAX_DEFAULT
++The flag defines maximum supported TLS version as TLSv1.2 or default
++value from SSL library.
++(Added in 7.54.0)
++.IP CURL_SSLVERSION_MAX_TLSv1_0
++The flag defines maximum supported TLS version as TLSv1.0.
++(Added in 7.54.0)
++.IP CURL_SSLVERSION_MAX_TLSv1_1
++The flag defines maximum supported TLS version as TLSv1.1.
++(Added in 7.54.0)
++.IP CURL_SSLVERSION_MAX_TLSv1_2
++The flag defines maximum supported TLS version as TLSv1.2.
++(Added in 7.54.0)
++.IP CURL_SSLVERSION_MAX_TLSv1_3
++The flag defines maximum supported TLS version as TLSv1.3.
++(Added in 7.54.0)
+ .RE
+ .IP CURLOPT_SSL_VERIFYPEER
+ Pass a long as parameter. By default, curl assumes a value of 1.
+diff --git a/docs/libcurl/symbols-in-versions b/docs/libcurl/symbols-in-versions
+index a66bd97..34e0ac3 100644
+--- a/docs/libcurl/symbols-in-versions
++++ b/docs/libcurl/symbols-in-versions
+@@ -685,7 +685,13 @@ CURL_SSLVERSION_TLSv1           7.9.2
+ CURL_SSLVERSION_TLSv1_0         7.34.0
+ CURL_SSLVERSION_TLSv1_1         7.34.0
+ CURL_SSLVERSION_TLSv1_2         7.34.0
+-CURL_SSLVERSION_TLSv1_3         7.51.1
++CURL_SSLVERSION_TLSv1_3         7.52.0
++CURL_SSLVERSION_MAX_NONE        7.54.0
++CURL_SSLVERSION_MAX_DEFAULT     7.54.0
++CURL_SSLVERSION_MAX_TLSv1_0     7.54.0
++CURL_SSLVERSION_MAX_TLSv1_1     7.54.0
++CURL_SSLVERSION_MAX_TLSv1_2     7.54.0
++CURL_SSLVERSION_MAX_TLSv1_3     7.54.0
+ CURL_TIMECOND_IFMODSINCE        7.9.7
+ CURL_TIMECOND_IFUNMODSINCE      7.9.7
+ CURL_TIMECOND_LASTMOD           7.9.7
+diff --git a/include/curl/curl.h b/include/curl/curl.h
+index 0fb1885..5a46925 100644
+--- a/include/curl/curl.h
++++ b/include/curl/curl.h
+@@ -1650,6 +1650,18 @@ enum {
+   CURL_SSLVERSION_LAST /* never use, keep last */
+ };
+ 
++enum {
++  CURL_SSLVERSION_MAX_NONE =     0,
++  CURL_SSLVERSION_MAX_DEFAULT =  (CURL_SSLVERSION_TLSv1   << 16),
++  CURL_SSLVERSION_MAX_TLSv1_0 =  (CURL_SSLVERSION_TLSv1_0 << 16),
++  CURL_SSLVERSION_MAX_TLSv1_1 =  (CURL_SSLVERSION_TLSv1_1 << 16),
++  CURL_SSLVERSION_MAX_TLSv1_2 =  (CURL_SSLVERSION_TLSv1_2 << 16),
++  CURL_SSLVERSION_MAX_TLSv1_3 =  (CURL_SSLVERSION_TLSv1_3 << 16),
++
++  /* never use, keep last */
++  CURL_SSLVERSION_MAX_LAST =     (CURL_SSLVERSION_LAST    << 16)
++};
++
+ enum CURL_TLSAUTH {
+   CURL_TLSAUTH_NONE,
+   CURL_TLSAUTH_SRP,
+diff --git a/lib/nss.c b/lib/nss.c
+index 8e26d1f..d8e481b 100644
+--- a/lib/nss.c
++++ b/lib/nss.c
+@@ -1284,67 +1284,105 @@ static CURLcode nss_load_ca_certificates(struct connectdata *conn,
+   return CURLE_OK;
+ }
+ 
+-static CURLcode nss_init_sslver(SSLVersionRange *sslver,
+-                                struct SessionHandle *data)
++static CURLcode nss_sslver_from_curl(PRUint16 *nssver, long version)
+ {
+-  switch (data->set.ssl.version) {
+-  default:
+-  case CURL_SSLVERSION_DEFAULT:
+-    break;
+-
++  switch(version) {
+   case CURL_SSLVERSION_TLSv1:
+-    sslver->min = SSL_LIBRARY_VERSION_TLS_1_0;
+ #ifdef SSL_LIBRARY_VERSION_TLS_1_2
+-    sslver->max = SSL_LIBRARY_VERSION_TLS_1_2;
++    *nssver = SSL_LIBRARY_VERSION_TLS_1_2;
+ #elif defined SSL_LIBRARY_VERSION_TLS_1_1
+-    sslver->max = SSL_LIBRARY_VERSION_TLS_1_1;
++    *nssver = SSL_LIBRARY_VERSION_TLS_1_1;
+ #else
+-    sslver->max = SSL_LIBRARY_VERSION_TLS_1_0;
++    *nssver = SSL_LIBRARY_VERSION_TLS_1_0;
+ #endif
+     return CURLE_OK;
+ 
+   case CURL_SSLVERSION_SSLv2:
+-    sslver->min = SSL_LIBRARY_VERSION_2;
+-    sslver->max = SSL_LIBRARY_VERSION_2;
++    *nssver = SSL_LIBRARY_VERSION_2;
+     return CURLE_OK;
+ 
+   case CURL_SSLVERSION_SSLv3:
+-    sslver->min = SSL_LIBRARY_VERSION_3_0;
+-    sslver->max = SSL_LIBRARY_VERSION_3_0;
++    *nssver = SSL_LIBRARY_VERSION_3_0;
+     return CURLE_OK;
+ 
+   case CURL_SSLVERSION_TLSv1_0:
+-    sslver->min = SSL_LIBRARY_VERSION_TLS_1_0;
+-    sslver->max = SSL_LIBRARY_VERSION_TLS_1_0;
++    *nssver = SSL_LIBRARY_VERSION_TLS_1_0;
+     return CURLE_OK;
+ 
+   case CURL_SSLVERSION_TLSv1_1:
+ #ifdef SSL_LIBRARY_VERSION_TLS_1_1
+-    sslver->min = SSL_LIBRARY_VERSION_TLS_1_1;
+-    sslver->max = SSL_LIBRARY_VERSION_TLS_1_1;
++    *nssver = SSL_LIBRARY_VERSION_TLS_1_1;
+     return CURLE_OK;
++#else
++    return CURLE_SSL_CONNECT_ERROR;
+ #endif
+-    break;
+ 
+   case CURL_SSLVERSION_TLSv1_2:
+ #ifdef SSL_LIBRARY_VERSION_TLS_1_2
+-    sslver->min = SSL_LIBRARY_VERSION_TLS_1_2;
+-    sslver->max = SSL_LIBRARY_VERSION_TLS_1_2;
++    *nssver = SSL_LIBRARY_VERSION_TLS_1_2;
+     return CURLE_OK;
++#else
++    return CURLE_SSL_CONNECT_ERROR;
+ #endif
+-    break;
+ 
+   case CURL_SSLVERSION_TLSv1_3:
+ #ifdef SSL_LIBRARY_VERSION_TLS_1_3
+-    sslver->min = SSL_LIBRARY_VERSION_TLS_1_3;
+-    sslver->max = SSL_LIBRARY_VERSION_TLS_1_3;
++    *nssver = SSL_LIBRARY_VERSION_TLS_1_3;
+     return CURLE_OK;
++#else
++    return CURLE_SSL_CONNECT_ERROR;
+ #endif
++
++  default:
++    return CURLE_SSL_CONNECT_ERROR;
++  }
++}
++
++static CURLcode nss_init_sslver(SSLVersionRange *sslver,
++                                struct SessionHandle *data)
++{
++  CURLcode result;
++  const long min = data->set.ssl.version;
++  const long max = data->set.ssl.version_max;
++
++  if(min == CURL_SSLVERSION_DEFAULT || max == CURL_SSLVERSION_MAX_DEFAULT) {
++    /* map CURL_SSLVERSION_DEFAULT to NSS default */
++    if(SSL_VersionRangeGetDefault(ssl_variant_stream, sslver) != SECSuccess)
++      return CURLE_SSL_CONNECT_ERROR;
++    /* ... but make sure we use at least TLSv1.0 according to libcurl API */
++    if(sslver->min < SSL_LIBRARY_VERSION_TLS_1_0)
++      sslver->min = SSL_LIBRARY_VERSION_TLS_1_0;
++  }
++
++  switch(min) {
++  case CURL_SSLVERSION_DEFAULT:
++    break;
++  case CURL_SSLVERSION_TLSv1:
++    sslver->min = SSL_LIBRARY_VERSION_TLS_1_0;
+     break;
++  default:
++    result = nss_sslver_from_curl(&sslver->min, min);
++    if(result) {
++      failf(data, "unsupported min version passed via CURLOPT_SSLVERSION");
++      return result;
++    }
++    if(max == CURL_SSLVERSION_MAX_NONE)
++      sslver->max = sslver->min;
++  }
++
++  switch(max) {
++  case CURL_SSLVERSION_MAX_NONE:
++  case CURL_SSLVERSION_MAX_DEFAULT:
++    break;
++  default:
++    result = nss_sslver_from_curl(&sslver->max, max >> 16);
++    if(result) {
++      failf(data, "unsupported max version passed via CURLOPT_SSLVERSION");
++      return result;
++    }
+   }
+ 
+-  failf(data, "TLS minor version cannot be set");
+-  return CURLE_SSL_CONNECT_ERROR;
++  return CURLE_OK;
+ }
+ 
+ static CURLcode nss_fail_connect(struct ssl_connect_data *connssl,
+@@ -1400,7 +1438,7 @@ static CURLcode nss_setup_connect(struct connectdata *conn, int sockindex)
+   CURLcode curlerr;
+ 
+   SSLVersionRange sslver = {
+-    SSL_LIBRARY_VERSION_3_0,      /* min */
++    SSL_LIBRARY_VERSION_TLS_1_0,  /* min */
+     SSL_LIBRARY_VERSION_TLS_1_0   /* max */
+   };
+ 
+diff --git a/lib/sslgen.c b/lib/sslgen.c
+index 79cbb6f..d917f05 100644
+--- a/lib/sslgen.c
++++ b/lib/sslgen.c
+@@ -86,6 +86,7 @@ Curl_ssl_config_matches(struct ssl_config_data* data,
+                         struct ssl_config_data* needle)
+ {
+   if((data->version == needle->version) &&
++     (data->version_max == needle->version_max) &&
+      (data->verifypeer == needle->verifypeer) &&
+      (data->verifyhost == needle->verifyhost) &&
+      safe_strequal(data->CApath, needle->CApath) &&
+@@ -107,6 +108,7 @@ Curl_clone_ssl_config(struct ssl_config_data *source,
+   dest->verifyhost = source->verifyhost;
+   dest->verifypeer = source->verifypeer;
+   dest->version = source->version;
++  dest->version_max = source->version_max;
+ 
+   if(source->CAfile) {
+     dest->CAfile = strdup(source->CAfile);
+diff --git a/lib/url.c b/lib/url.c
+index cb3f3c3..cc099a5 100644
+--- a/lib/url.c
++++ b/lib/url.c
+@@ -667,6 +667,9 @@ CURLcode Curl_open(struct SessionHandle **curl)
+   return res;
+ }
+ 
++#define C_SSLVERSION_VALUE(x) (x & 0xffff)
++#define C_SSLVERSION_MAX_VALUE(x) (x & 0xffff0000)
++
+ CURLcode Curl_setopt(struct SessionHandle *data, CURLoption option,
+                      va_list param)
+ {
+@@ -882,7 +885,9 @@ CURLcode Curl_setopt(struct SessionHandle *data, CURLoption option,
+      * Set explicit SSL version to try to connect with, as some SSL
+      * implementations are lame.
+      */
+-    data->set.ssl.version = va_arg(param, long);
++    arg = va_arg(param, long);
++    data->set.ssl.version = C_SSLVERSION_VALUE(arg);
++    data->set.ssl.version_max = C_SSLVERSION_MAX_VALUE(arg);
+     break;
+ 
+ #ifndef CURL_DISABLE_HTTP
+diff --git a/lib/urldata.h b/lib/urldata.h
+index d10c784..a5027ed 100644
+--- a/lib/urldata.h
++++ b/lib/urldata.h
+@@ -335,6 +335,7 @@ struct ssl_connect_data {
+ 
+ struct ssl_config_data {
+   long version;          /* what version the client wants to use */
++  long version_max;      /* max supported version the client wants to use*/
+   long certverifyresult; /* result from the certificate verification */
+ 
+   bool verifypeer;       /* set TRUE if this is desired */
+diff --git a/src/tool_cfgable.h b/src/tool_cfgable.h
+index 68d0297..5f45f63 100644
+--- a/src/tool_cfgable.h
++++ b/src/tool_cfgable.h
+@@ -146,6 +146,7 @@ struct Configurable {
+   struct curl_slist *postquote;
+   struct curl_slist *prequote;
+   long ssl_version;
++  long ssl_version_max;
+   long ip_version;
+   curl_TimeCond timecond;
+   time_t condtime;
+diff --git a/src/tool_getparam.c b/src/tool_getparam.c
+index 86a7bb6..9a228b9 100644
+--- a/src/tool_getparam.c
++++ b/src/tool_getparam.c
+@@ -174,6 +174,7 @@ static const struct LongShort aliases[]= {
+   {"$I", "post303",                  FALSE},
+   {"$J", "metalink",                 FALSE},
+   {"$M", "unix-socket",              TRUE},
++  {"$X", "tls-max",                  TRUE},
+   {"0",  "http1.0",                  FALSE},
+   {"1",  "tlsv1",                    FALSE},
+   {"10",  "tlsv1.0",                 FALSE},
+@@ -968,6 +969,11 @@ ParameterError getparameter(char *flag,    /* f or -long-flag */
+       case 'M': /* --unix-socket */
+         GetStr(&config->unix_socket_path, nextarg);
+         break;
++      case 'X': /* --tls-max */
++        err = str2tls_max(&config->ssl_version_max, nextarg);
++        if(err)
++          return err;
++        break;
+       }
+       break;
+     case '#': /* --progress-bar */
+diff --git a/src/tool_help.c b/src/tool_help.c
+index 0659db6..3eeef6d 100644
+--- a/src/tool_help.c
++++ b/src/tool_help.c
+@@ -206,6 +206,7 @@ static const char *const helptext[] = {
+   "     --tlsv1.1       Use TLSv1.1 (SSL)",
+   "     --tlsv1.2       Use TLSv1.2 (SSL)",
+   "     --tlsv1.3       Use TLSv1.3 (SSL)",
++  "     --tls-max VERSION  Use TLS up to VERSION (SSL)",
+   "     --trace FILE    Write a debug trace to the given file",
+   "     --trace-ascii FILE  Like --trace but without the hex output",
+   "     --trace-time    Add time stamps to trace/verbose output",
+diff --git a/src/tool_operate.c b/src/tool_operate.c
+index 185f9c6..052def1 100644
+--- a/src/tool_operate.c
++++ b/src/tool_operate.c
+@@ -1109,7 +1109,8 @@ int operate(struct Configurable *config, int argc, argv_item_t argv[])
+         }
+ #endif
+ 
+-        my_setopt_enum(curl, CURLOPT_SSLVERSION, config->ssl_version);
++        my_setopt_enum(curl, CURLOPT_SSLVERSION,
++                       config->ssl_version | config->ssl_version_max);
+         my_setopt_enum(curl, CURLOPT_TIMECONDITION, config->timecond);
+         my_setopt(curl, CURLOPT_TIMEVALUE, config->condtime);
+         my_setopt_str(curl, CURLOPT_CUSTOMREQUEST, config->customrequest);
+diff --git a/src/tool_paramhlp.c b/src/tool_paramhlp.c
+index 5d6f8bb..5ceddb2 100644
+--- a/src/tool_paramhlp.c
++++ b/src/tool_paramhlp.c
+@@ -405,3 +405,35 @@ long delegation(struct Configurable *config, char *str)
+   return CURLGSSAPI_DELEGATION_NONE;
+ }
+ 
++/*
++ * Parse the string and modify ssl_version in the val argument. Return PARAM_OK
++ * on success, otherwise a parameter error enum. ONLY ACCEPTS POSITIVE NUMBERS!
++ *
++ * Since this function gets called with the 'nextarg' pointer from within the
++ * getparameter a lot, we must check it for NULL before accessing the str
++ * data.
++ */
++
++ParameterError str2tls_max(long *val, const char *str)
++{
++   static struct s_tls_max {
++    const char *tls_max_str;
++    long tls_max;
++  } const tls_max_array[] = {
++    { "default", CURL_SSLVERSION_MAX_DEFAULT },
++    { "1.0",     CURL_SSLVERSION_MAX_TLSv1_0 },
++    { "1.1",     CURL_SSLVERSION_MAX_TLSv1_1 },
++    { "1.2",     CURL_SSLVERSION_MAX_TLSv1_2 },
++    { "1.3",     CURL_SSLVERSION_MAX_TLSv1_3 }
++  };
++  size_t i = 0;
++  if(!str)
++    return PARAM_REQUIRES_PARAMETER;
++  for(i = 0; i < sizeof(tls_max_array)/sizeof(tls_max_array[0]); i++) {
++    if(!strcmp(str, tls_max_array[i].tls_max_str)) {
++      *val = tls_max_array[i].tls_max;
++      return PARAM_OK;
++    }
++  }
++  return PARAM_BAD_USE;
++}
+diff --git a/src/tool_paramhlp.h b/src/tool_paramhlp.h
+index de1604e..c848d1c 100644
+--- a/src/tool_paramhlp.h
++++ b/src/tool_paramhlp.h
+@@ -48,5 +48,7 @@ int ftpcccmethod(struct Configurable *config, const char *str);
+ 
+ long delegation(struct Configurable *config, char *str);
+ 
++ParameterError str2tls_max(long *val, const char *str);
++
+ #endif /* HEADER_CURL_TOOL_PARAMHLP_H */
+ 
+-- 
+2.20.1
+
+
+From 6a332224ba66b7ad21f6a874af94c1b7441ca19f Mon Sep 17 00:00:00 2001
+From: Hubert Kario <hkario@redhat.com>
+Date: Fri, 17 May 2019 17:15:24 +0000
+Subject: [PATCH 4/5] nss: allow to specify TLS 1.3 ciphers if supported by NSS
+
+Closes #3916
+
+Upstream-commit: 319ae9075efba769c9d5e98e827bb325ad0fcb6f
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/nss.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/lib/nss.c b/lib/nss.c
+index d8e481b..330387c 100644
+--- a/lib/nss.c
++++ b/lib/nss.c
+@@ -195,6 +195,11 @@ static const cipher_s cipherlist[] = {
+  {"dhe_rsa_chacha20_poly1305_sha_256",
+      TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256},
+ #endif
++#ifdef TLS_AES_256_GCM_SHA384
++ {"aes_128_gcm_sha_256",              TLS_AES_128_GCM_SHA256},
++ {"aes_256_gcm_sha_384",              TLS_AES_256_GCM_SHA384},
++ {"chacha20_poly1305_sha_256",        TLS_CHACHA20_POLY1305_SHA256},
++#endif
+ };
+ 
+ static const char* pem_library = "libnsspem.so";
+-- 
+2.20.1
+
+
+From 268dcd88beb3d270d5aaeda473d51550ea9a3f84 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Mon, 3 Jun 2019 12:31:21 +0200
+Subject: [PATCH 5/5] nss: make `curl --tlsv1` compatible with
+ curl-7.29.0-52.el7
+
+---
+ lib/nss.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/lib/nss.c b/lib/nss.c
+index 330387c..f963c63 100644
+--- a/lib/nss.c
++++ b/lib/nss.c
+@@ -1350,7 +1350,9 @@ static CURLcode nss_init_sslver(SSLVersionRange *sslver,
+   const long min = data->set.ssl.version;
+   const long max = data->set.ssl.version_max;
+ 
+-  if(min == CURL_SSLVERSION_DEFAULT || max == CURL_SSLVERSION_MAX_DEFAULT) {
++  if(min == CURL_SSLVERSION_DEFAULT || max == CURL_SSLVERSION_MAX_DEFAULT
++      || min == CURL_SSLVERSION_TLSv1)
++  {
+     /* map CURL_SSLVERSION_DEFAULT to NSS default */
+     if(SSL_VersionRangeGetDefault(ssl_variant_stream, sslver) != SECSuccess)
+       return CURLE_SSL_CONNECT_ERROR;
+-- 
+2.20.1
+

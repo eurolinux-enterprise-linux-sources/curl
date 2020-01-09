@@ -1,7 +1,7 @@
 Summary: A utility for getting files from remote servers (FTP, HTTP, and others)
 Name: curl
 Version: 7.29.0
-Release: 51%{?dist}.3
+Release: 54%{?dist}
 License: MIT
 Group: Applications/Internet
 Source: http://curl.haxx.se/download/%{name}-%{version}.tar.lzma
@@ -202,11 +202,17 @@ Patch64:  0064-curl-7.29.0-CVE-2018-1000301.patch
 # make curl --speed-limit work with TFTP (#1584750)
 Patch65:  0065-curl-7.29.0-tftp-speed-limit.patch
 
-# prevent curl --rate-limit from hanging on file URLs (#1281969)
-Patch69:  0069-curl-7.29.0-file-limit-rate.patch
+# backport options to force TLS 1.3 in curl and libcurl (#1672639)
+Patch66:  0066-curl-7.29.0-tls13-opt.patch
+
+# fix bad arithmetic when outputting warnings to stderr (CVE-2018-16842)
+Patch67:  0067-curl-7.29.0-CVE-2018-16842.patch
 
 # fix NTLM password overflow via integer overflow (CVE-2018-14618)
 Patch68:  0068-curl-7.29.0-CVE-2018-14618.patch
+
+# prevent curl --rate-limit from hanging on file URLs (#1281969)
+Patch69:  0069-curl-7.29.0-file-limit-rate.patch
 
 # patch making libcurl multilib ready
 Patch101: 0101-curl-7.29.0-multilib.patch
@@ -403,6 +409,8 @@ documentation of the library, too.
 %patch63 -p1
 %patch64 -p1
 %patch65 -p1
+%patch66 -p1
+%patch67 -p1
 %patch68 -p1
 %patch69 -p1
 
@@ -520,14 +528,18 @@ rm -rf $RPM_BUILD_ROOT
 %{_datadir}/aclocal/libcurl.m4
 
 %changelog
-* Mon May 27 2019 Kamil Dudka <kdudka@redhat.com> - 7.29.0-51.el7_6.3
-- fix NTLM password overflow via integer overflow (CVE-2018-14618)
+* Mon Jun 03 2019 Kamil Dudka <kdudka@redhat.com> - 7.29.0-54
+- make `curl --tlsv1` backward compatible (#1672639)
 
-* Mon May 20 2019 Kamil Dudka <kdudka@redhat.com> - 7.29.0-51.el7_6.2
-- prevent curl --rate-limit from crashing on https URLs (#1683292)
+* Mon May 27 2019 Kamil Dudka <kdudka@redhat.com> - 7.29.0-53
+- backport the --tls-max option of curl and TLS 1.3 ciphers (#1672639)
 
-* Mon May 13 2019 Kamil Dudka <kdudka@redhat.com> - 7.29.0-51.el7_6.1
+* Fri Mar 01 2019 Kamil Dudka <kdudka@redhat.com> - 7.29.0-52
 - prevent curl --rate-limit from hanging on file URLs (#1281969)
+- fix NTLM password overflow via integer overflow (CVE-2018-14618)
+- fix bad arithmetic when outputting warnings to stderr (CVE-2018-16842)
+- backport options to force TLS 1.3 in curl and libcurl (#1672639)
+- prevent curl --rate-limit from crashing on https URLs (#1683292)
 
 * Wed Aug 08 2018 Kamil Dudka <kdudka@redhat.com> - 7.29.0-51
 - require a new enough version of nss-pem to avoid regression in yum (#1610998)
