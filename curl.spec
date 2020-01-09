@@ -1,7 +1,7 @@
 Summary: A utility for getting files from remote servers (FTP, HTTP, and others)
 Name: curl
 Version: 7.29.0
-Release: 51%{?dist}
+Release: 51%{?dist}.3
 License: MIT
 Group: Applications/Internet
 Source: http://curl.haxx.se/download/%{name}-%{version}.tar.lzma
@@ -202,6 +202,12 @@ Patch64:  0064-curl-7.29.0-CVE-2018-1000301.patch
 # make curl --speed-limit work with TFTP (#1584750)
 Patch65:  0065-curl-7.29.0-tftp-speed-limit.patch
 
+# prevent curl --rate-limit from hanging on file URLs (#1281969)
+Patch69:  0069-curl-7.29.0-file-limit-rate.patch
+
+# fix NTLM password overflow via integer overflow (CVE-2018-14618)
+Patch68:  0068-curl-7.29.0-CVE-2018-14618.patch
+
 # patch making libcurl multilib ready
 Patch101: 0101-curl-7.29.0-multilib.patch
 
@@ -397,6 +403,8 @@ documentation of the library, too.
 %patch63 -p1
 %patch64 -p1
 %patch65 -p1
+%patch68 -p1
+%patch69 -p1
 
 # regenerate Makefile.in files
 aclocal -I m4
@@ -512,6 +520,15 @@ rm -rf $RPM_BUILD_ROOT
 %{_datadir}/aclocal/libcurl.m4
 
 %changelog
+* Mon May 27 2019 Kamil Dudka <kdudka@redhat.com> - 7.29.0-51.el7_6.3
+- fix NTLM password overflow via integer overflow (CVE-2018-14618)
+
+* Mon May 20 2019 Kamil Dudka <kdudka@redhat.com> - 7.29.0-51.el7_6.2
+- prevent curl --rate-limit from crashing on https URLs (#1683292)
+
+* Mon May 13 2019 Kamil Dudka <kdudka@redhat.com> - 7.29.0-51.el7_6.1
+- prevent curl --rate-limit from hanging on file URLs (#1281969)
+
 * Wed Aug 08 2018 Kamil Dudka <kdudka@redhat.com> - 7.29.0-51
 - require a new enough version of nss-pem to avoid regression in yum (#1610998)
 

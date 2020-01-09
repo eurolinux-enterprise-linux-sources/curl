@@ -1,0 +1,90 @@
+From 4d5f2c162fe8b0a05f05c7f03573381c11ec2958 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Sun, 22 Dec 2013 23:36:11 +0100
+Subject: [PATCH 1/2] FILE: don't wait due to CURLOPT_MAX_RECV_SPEED_LARGE
+
+The FILE:// code doesn't support this option - and it doesn't make sense
+to support it as long as it works as it does since then it'd only block
+even longer.
+
+But: setting CURLOPT_MAX_RECV_SPEED_LARGE would make the transfer first
+get done and then libcurl would wait until the average speed would get
+low enough. This happened because the transfer happens completely in the
+DO state for FILE:// but then it would still unconditionally continue in
+to the PERFORM state where the speed check is made.
+
+Starting now, the code will skip from DO_DONE to DONE immediately if no
+socket is set to be recv()ed or send()ed to.
+
+Bug: http://curl.haxx.se/bug/view.cgi?id=1312
+Reported-by: Mohammad AlSaleh
+
+Upstream-commit: 2715d7f948c8eb7cd3cba38f3dff6d4148e7cfaf
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/multi.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/lib/multi.c b/lib/multi.c
+index 39a0938..f27a18f 100644
+--- a/lib/multi.c
++++ b/lib/multi.c
+@@ -1398,7 +1398,13 @@ static CURLMcode multi_runsingle(struct Curl_multi *multi,
+       moveHandleFromSendToRecvPipeline(data, easy->easy_conn);
+       /* Check if we can move pending requests to send pipe */
+       checkPendPipeline(easy->easy_conn);
+-      multistate(easy, CURLM_STATE_WAITPERFORM);
++      /* Only perform the transfer if there's a good socket to work with.
++         Having both BAD is a signal to skip immediately to DONE */
++      if((easy->easy_conn->sockfd != CURL_SOCKET_BAD) ||
++         (easy->easy_conn->writesockfd != CURL_SOCKET_BAD))
++        multistate(easy, CURLM_STATE_WAITPERFORM);
++      else
++        multistate(easy, CURLM_STATE_DONE);
+       result = CURLM_CALL_MULTI_PERFORM;
+       break;
+ 
+-- 
+2.17.2
+
+
+From 876a1e81ff44157bbd5e48ca5e120f4266aefc9e Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Sun, 22 Dec 2013 23:45:10 +0100
+Subject: [PATCH 2/2] docs: mention CURLOPT_MAX_RECV/SEND_SPEED_LARGE don't
+ work for FILE://
+
+Upstream-commit: f718415bc7914f4c238c88d8f76b22ddf4d470c9
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/libcurl/curl_easy_setopt.3 | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/docs/libcurl/curl_easy_setopt.3 b/docs/libcurl/curl_easy_setopt.3
+index 226e0ca..d720b95 100644
+--- a/docs/libcurl/curl_easy_setopt.3
++++ b/docs/libcurl/curl_easy_setopt.3
+@@ -2053,12 +2053,18 @@ it too slow and abort.
+ Pass a curl_off_t as parameter.  If an upload exceeds this speed (counted in
+ bytes per second) on cumulative average during the transfer, the transfer will
+ pause to keep the average rate less than or equal to the parameter value.
+-Defaults to unlimited speed. (Added in 7.15.5)
++Defaults to unlimited speed.
++
++This option doesn't affect transfer speeds done with FILE:// URLs. (Added in
++ 7.15.5)
+ .IP CURLOPT_MAX_RECV_SPEED_LARGE
+ Pass a curl_off_t as parameter.  If a download exceeds this speed (counted in
+ bytes per second) on cumulative average during the transfer, the transfer will
+ pause to keep the average rate less than or equal to the parameter
+-value. Defaults to unlimited speed. (Added in 7.15.5)
++value. Defaults to unlimited speed.
++
++This option doesn't affect transfer speeds done with FILE:// URLs. (Added in
++7.15.5)
+ .IP CURLOPT_MAXCONNECTS
+ Pass a long. The set number will be the persistent connection cache size. The
+ set amount will be the maximum amount of simultaneously open connections that
+-- 
+2.17.2
+
