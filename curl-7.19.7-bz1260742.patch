@@ -1,0 +1,332 @@
+From 60049e4e919cf277accf13f5eb1c94981f981c9a Mon Sep 17 00:00:00 2001
+From: Armel Asselin <armelasselin@hotmail.com>
+Date: Sun, 1 Apr 2012 20:22:37 +0200
+Subject: [PATCH 1/3] SSH: public key can now be an empty string
+
+If an empty string is passed to CURLOPT_SSH_PUBLIC_KEYFILE, libcurl will
+pass no public key to libssh2 which then tries to compute it from the
+private key. This is known to work when libssh2 1.4.0+ is linked against
+OpenSSL.
+
+Upstream-commit: 05a443adf2d607a53a943d6f1df33cd765061c4e
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/libcurl/curl_easy_setopt.3 | 3 +++
+ lib/ssh.c                       | 8 ++++++--
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/docs/libcurl/curl_easy_setopt.3 b/docs/libcurl/curl_easy_setopt.3
+index 013f71f..e87b261 100644
+--- a/docs/libcurl/curl_easy_setopt.3
++++ b/docs/libcurl/curl_easy_setopt.3
+@@ -1753,6 +1753,9 @@ option is only for SCP and SFTP transfers. (Added in 7.17.1)
+ Pass a char * pointing to a file name for your public key. If not used,
+ libcurl defaults to using \fB~/.ssh/id_dsa.pub\fP.
+ (Added in 7.16.1)
++If an empty string is passed, libcurl will pass no public key to libssh2
++which then tries to compute it from the private key, this is known to work
++when libssh2 1.4.0+ is linked against OpenSSL. (Added in 7.25.1)
+ .IP CURLOPT_SSH_PRIVATE_KEYFILE
+ Pass a char * pointing to a file name for your private key. If not used,
+ libcurl defaults to using \fB~/.ssh/id_dsa\fP.
+diff --git a/lib/ssh.c b/lib/ssh.c
+index 2ec0429..219c58a 100644
+--- a/lib/ssh.c
++++ b/lib/ssh.c
+@@ -731,6 +731,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
+     if((data->set.ssh_auth_types & CURLSSH_AUTH_PUBLICKEY) &&
+        (strstr(sshc->authlist, "publickey") != NULL)) {
+       char *home;
++      bool rsa_pub_empty_but_ok = FALSE;
+ 
+       sshc->rsa_pub = sshc->rsa = NULL;
+ 
+@@ -738,7 +739,10 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
+          HOME environment variable etc? */
+       home = curl_getenv("HOME");
+ 
+-      if(data->set.str[STRING_SSH_PUBLIC_KEY])
++      if(data->set.str[STRING_SSH_PUBLIC_KEY] &&
++          !*data->set.str[STRING_SSH_PUBLIC_KEY])
++        rsa_pub_empty_but_ok = true;
++      else if(data->set.str[STRING_SSH_PUBLIC_KEY])
+         sshc->rsa_pub = aprintf("%s", data->set.str[STRING_SSH_PUBLIC_KEY]);
+       else if(home)
+         sshc->rsa_pub = aprintf("%s/.ssh/id_dsa.pub", home);
+@@ -746,7 +750,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
+         /* as a final resort, try current dir! */
+         sshc->rsa_pub = strdup("id_dsa.pub");
+ 
+-      if(sshc->rsa_pub == NULL) {
++      if(!rsa_pub_empty_but_ok && (sshc->rsa_pub == NULL)) {
+         Curl_safefree(home);
+         home = NULL;
+         state(conn, SSH_SESSION_FREE);
+-- 
+2.5.2
+
+
+From 7739f31171672d4e93c98c7c169b6e91a6b1c2ab Mon Sep 17 00:00:00 2001
+From: Jeremy Lin <jjlin@cs.stanford.edu>
+Date: Mon, 15 Sep 2014 21:16:46 -0700
+Subject: [PATCH 2/3] ssh: improve key file search
+
+For private keys, use the first match from: user-specified key file
+(if provided), ~/.ssh/id_rsa, ~/.ssh/id_dsa, ./id_rsa, ./id_dsa
+
+Note that the previous code only looked for id_dsa files. id_rsa is
+now generally preferred, as it supports larger key sizes.
+
+For public keys, use the user-specified key file, if provided.
+Otherwise, try to extract the public key from the private key file.
+This means that passing --pubkey is typically no longer required,
+and makes the key-handling behavior more like OpenSSH.
+
+Upstream-commit: fa7d04fed4d4578fe29bdff0b5465f6e4a7da81a
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/MANUAL | 26 +++++++++++++++-------
+ docs/curl.1 |  8 ++++++-
+ lib/ssh.c   | 74 +++++++++++++++++++++++++++++++++++++++----------------------
+ 3 files changed, 73 insertions(+), 35 deletions(-)
+
+diff --git a/docs/MANUAL b/docs/MANUAL
+index b59231a..05be662 100644
+--- a/docs/MANUAL
++++ b/docs/MANUAL
+@@ -41,12 +41,19 @@ SIMPLE USAGE
+ 
+   Get a file from an SSH server using SFTP:
+ 
+-        curl -u username sftp://shell.example.com/etc/issue
++        curl -u username sftp://example.com/etc/issue
+ 
+-  Get a file from an SSH server using SCP using a private key to authenticate:
++  Get a file from an SSH server using SCP using a private key
++  (not password-protected) to authenticate:
+ 
+-        curl -u username: --key ~/.ssh/id_dsa --pubkey ~/.ssh/id_dsa.pub \
+-        	scp://shell.example.com/~/personal.txt
++        curl -u username: --key ~/.ssh/id_dsa \
++             scp://example.com/~/file.txt
++
++  Get a file from an SSH server using SCP using a private key
++  (password-protected) to authenticate:
++
++        curl -u username: --key ~/.ssh/id_rsa --pass private_key_password \
++             scp://example.com/~/file.txt
+ 
+   Get the main page from an IPv6 web server:
+ 
+@@ -91,10 +98,13 @@ USING PASSWORDS
+ 
+  SFTP / SCP
+ 
+-   This is similar to FTP, but you can specify a private key to use instead of
+-   a password. Note that the private key may itself be protected by a password
+-   that is unrelated to the login password of the remote system.  If you
+-   provide a private key file you must also provide a public key file.
++   This is similar to FTP, but you can use the --key option to specify a
++   private key to use instead of a password. Note that the private key may
++   itself be protected by a password that is unrelated to the login password
++   of the remote system; this password is specified using the --pass option.
++   Typically, curl will automatically extract the public key from the private
++   key file, but in cases where curl does not have the proper library support,
++   a matching public key file must be specified using the --pubkey option.
+ 
+  HTTP
+ 
+diff --git a/docs/curl.1 b/docs/curl.1
+index f281e57..374d717 100644
+--- a/docs/curl.1
++++ b/docs/curl.1
+@@ -622,7 +622,8 @@ option has no effect if \fI--no-keepalive\fP is used. (Added in 7.18.0)
+ If this option is used multiple times, the last occurrence sets the amount.
+ .IP "--key <key>"
+ (SSL/SSH) Private key file name. Allows you to provide your private key in this
+-separate file.
++separate file. For SSH, if not specified, curl tries the following candidates
++in order: '~/.ssh/id_rsa', '~/.ssh/id_dsa', './id_rsa', './id_dsa'.
+ 
+ If this option is used several times, the last one will be used.
+ .IP "--key-type <type>"
+@@ -949,6 +950,11 @@ remote port number curl wants to tunnel through to.
+ separate file.
+ 
+ If this option is used several times, the last one will be used.
++
++(As of 7.39.0, curl attempts to automatically extract the public key from the
++private key file, so passing this option is generally not required. Note that
++this public key extraction requires libcurl to be linked against a copy of
++libssh2 1.2.8 or higher that is itself linked against OpenSSL.)
+ .IP "-P/--ftp-port <address>"
+ (FTP) Reverses the default initiator/listener roles when connecting with
+ FTP. This switch makes curl use active mode. In practice, curl then tells the
+diff --git a/lib/ssh.c b/lib/ssh.c
+index 219c58a..21413b4 100644
+--- a/lib/ssh.c
++++ b/lib/ssh.c
+@@ -731,7 +731,7 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
+     if((data->set.ssh_auth_types & CURLSSH_AUTH_PUBLICKEY) &&
+        (strstr(sshc->authlist, "publickey") != NULL)) {
+       char *home;
+-      bool rsa_pub_empty_but_ok = FALSE;
++      bool out_of_memory = FALSE;
+ 
+       sshc->rsa_pub = sshc->rsa = NULL;
+ 
+@@ -739,36 +739,58 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
+          HOME environment variable etc? */
+       home = curl_getenv("HOME");
+ 
+-      if(data->set.str[STRING_SSH_PUBLIC_KEY] &&
+-          !*data->set.str[STRING_SSH_PUBLIC_KEY])
+-        rsa_pub_empty_but_ok = true;
+-      else if(data->set.str[STRING_SSH_PUBLIC_KEY])
+-        sshc->rsa_pub = aprintf("%s", data->set.str[STRING_SSH_PUBLIC_KEY]);
+-      else if(home)
+-        sshc->rsa_pub = aprintf("%s/.ssh/id_dsa.pub", home);
+-      else
+-        /* as a final resort, try current dir! */
+-        sshc->rsa_pub = strdup("id_dsa.pub");
+-
+-      if(!rsa_pub_empty_but_ok && (sshc->rsa_pub == NULL)) {
+-        Curl_safefree(home);
+-        home = NULL;
+-        state(conn, SSH_SESSION_FREE);
+-        sshc->actualcode = CURLE_OUT_OF_MEMORY;
+-        break;
++      if(data->set.str[STRING_SSH_PRIVATE_KEY])
++        sshc->rsa = strdup(data->set.str[STRING_SSH_PRIVATE_KEY]);
++      else {
++        /* If no private key file is specified, try some common paths. */
++        if(home) {
++          /* Try ~/.ssh first. */
++          sshc->rsa = aprintf("%s/.ssh/id_rsa", home);
++          if(!sshc->rsa)
++            out_of_memory = TRUE;
++          else if(access(sshc->rsa, R_OK) != 0) {
++            Curl_safefree(sshc->rsa);
++            sshc->rsa = aprintf("%s/.ssh/id_dsa", home);
++            if(!sshc->rsa)
++              out_of_memory = TRUE;
++            else if(access(sshc->rsa, R_OK) != 0) {
++              Curl_safefree(sshc->rsa);
++              sshc->rsa = NULL;
++            }
++          }
++        }
++        if(!out_of_memory && !sshc->rsa) {
++          /* Nothing found; try the current dir. */
++          sshc->rsa = strdup("id_rsa");
++          if(sshc->rsa && access(sshc->rsa, R_OK) != 0) {
++            Curl_safefree(sshc->rsa);
++            sshc->rsa = strdup("id_dsa");
++            if(sshc->rsa && access(sshc->rsa, R_OK) != 0) {
++              Curl_safefree(sshc->rsa);
++              /* Out of guesses. Set to the empty string to avoid
++               * surprising info messages. */
++              sshc->rsa = strdup("");
++            }
++          }
++        }
+       }
+ 
+-      if(data->set.str[STRING_SSH_PRIVATE_KEY])
+-        sshc->rsa = aprintf("%s", data->set.str[STRING_SSH_PRIVATE_KEY]);
+-      else if(home)
+-        sshc->rsa = aprintf("%s/.ssh/id_dsa", home);
+-      else
+-        /* as a final resort, try current dir! */
+-        sshc->rsa = strdup("id_dsa");
++      /*
++       * Unless the user explicitly specifies a public key file, let
++       * libssh2 extract the public key from the private key file.
++       * This is done by simply passing sshc->rsa_pub = NULL.
++       */
++      if(data->set.str[STRING_SSH_PUBLIC_KEY]) {
++        sshc->rsa_pub = strdup(data->set.str[STRING_SSH_PUBLIC_KEY]);
++        if(!sshc->rsa_pub)
++          out_of_memory = TRUE;
++      }
+ 
+-      if(sshc->rsa == NULL) {
++      if(out_of_memory || sshc->rsa == NULL) {
+         Curl_safefree(home);
+         home = NULL;
++        Curl_safefree(sshc->rsa);
++        sshc->rsa = NULL;
+         Curl_safefree(sshc->rsa_pub);
+         sshc->rsa_pub = NULL;
+         state(conn, SSH_SESSION_FREE);
+-- 
+2.5.2
+
+
+From 6cfdcc974a5b85a765b1e1ee4be30493c74326e2 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Fri, 15 Jan 2016 10:27:33 +0100
+Subject: [PATCH 3/3] ssh: make CURLOPT_SSH_PUBLIC_KEYFILE treat "" as NULL
+
+The CURLOPT_SSH_PUBLIC_KEYFILE option has been documented to handle
+empty strings specially since curl-7_25_0-31-g05a443a but the behavior
+was unintentionally removed in curl-7_38_0-47-gfa7d04f.
+
+This commit restores the original behavior and clarifies it in the
+documentation that NULL and "" have both the same meaning when passed
+to CURLOPT_SSH_PUBLIC_KEYFILE.
+
+Bug: http://curl.haxx.se/mail/lib-2016-01/0072.html
+
+Upstream-commit: be538e07667e1ba880b7201014be706851428d40
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/libcurl/curl_easy_setopt.3 | 6 +++---
+ lib/ssh.c                       | 7 +++++--
+ 2 files changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/docs/libcurl/curl_easy_setopt.3 b/docs/libcurl/curl_easy_setopt.3
+index e87b261..a1da2ac 100644
+--- a/docs/libcurl/curl_easy_setopt.3
++++ b/docs/libcurl/curl_easy_setopt.3
+@@ -1753,9 +1753,9 @@ option is only for SCP and SFTP transfers. (Added in 7.17.1)
+ Pass a char * pointing to a file name for your public key. If not used,
+ libcurl defaults to using \fB~/.ssh/id_dsa.pub\fP.
+ (Added in 7.16.1)
+-If an empty string is passed, libcurl will pass no public key to libssh2
+-which then tries to compute it from the private key, this is known to work
+-when libssh2 1.4.0+ is linked against OpenSSL. (Added in 7.25.1)
++If NULL (or an empty string) is passed, libcurl will pass no public key to
++libssh2, which then tries to compute it from the private key.  This is known
++to work with libssh2 1.4.0+ linked against OpenSSL. (Added in 7.26.0)
+ .IP CURLOPT_SSH_PRIVATE_KEYFILE
+ Pass a char * pointing to a file name for your private key. If not used,
+ libcurl defaults to using \fB~/.ssh/id_dsa\fP.
+diff --git a/lib/ssh.c b/lib/ssh.c
+index 21413b4..11e5360 100644
+--- a/lib/ssh.c
++++ b/lib/ssh.c
+@@ -780,7 +780,9 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
+        * libssh2 extract the public key from the private key file.
+        * This is done by simply passing sshc->rsa_pub = NULL.
+        */
+-      if(data->set.str[STRING_SSH_PUBLIC_KEY]) {
++      if(data->set.str[STRING_SSH_PUBLIC_KEY]
++          /* treat empty string the same way as NULL */
++          && data->set.str[STRING_SSH_PUBLIC_KEY][0]) {
+         sshc->rsa_pub = strdup(data->set.str[STRING_SSH_PUBLIC_KEY]);
+         if(!sshc->rsa_pub)
+           out_of_memory = TRUE;
+@@ -805,7 +807,8 @@ static CURLcode ssh_statemach_act(struct connectdata *conn, bool *block)
+       Curl_safefree(home);
+       home = NULL;
+ 
+-      infof(data, "Using ssh public key file %s\n", sshc->rsa_pub);
++      if(sshc->rsa_pub)
++        infof(data, "Using ssh public key file %s\n", sshc->rsa_pub);
+       infof(data, "Using ssh private key file %s\n", sshc->rsa);
+ 
+       state(conn, SSH_AUTH_PKEY);
+-- 
+2.5.0
+

@@ -1,7 +1,7 @@
 Summary: A utility for getting files from remote servers (FTP, HTTP, and others)
 Name: curl
 Version: 7.19.7
-Release: 46%{?dist}
+Release: 52%{?dist}
 License: MIT
 Group: Applications/Internet
 Source: http://curl.haxx.se/download/%{name}-%{version}.tar.lzma
@@ -82,6 +82,12 @@ Patch255: curl-7.19.7-CVE-2014-3707.patch
 Patch256: curl-7.19.7-CVE-2014-8150.patch
 Patch257: curl-7.19.7-CVE-2015-3143.patch
 Patch258: curl-7.19.7-CVE-2015-3148.patch
+Patch259: curl-7.19.7-bz1258566.patch
+Patch260: curl-7.19.7-bz1260742.patch
+Patch261: curl-7.19.7-bz1269660.patch
+Patch262: curl-7.19.7-bz1277551.patch
+Patch263: curl-7.19.7-bz1289205.patch
+Patch264: curl-7.19.7-bz1302893.patch
 Provides: webclient
 URL: http://curl.haxx.se/
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
@@ -363,6 +369,24 @@ use cURL's capabilities internally.
 # close Negotiate connections when done (CVE-2015-3148)
 %patch258 -p1
 
+# make SCP/SFTP work with --proxytunnel (#1258566)
+%patch259 -p1
+
+# SSH: do not require public key file for user authentication (#1260742)
+%patch260 -p1
+
+# prevent NSS from incorrectly re-using a session (#1269660)
+%patch261 -p1
+
+# prevent test46 from failing due to expired cookie (#1277551)
+%patch262 -p1
+
+# use the default min/max TLS version provided by NSS (#1289205)
+%patch263 -p1
+
+# fix a bug in DNS caching code that causes a memory leak (#1302893)
+%patch264 -p1
+
 # run aclocal since we are going to run automake
 aclocal -I m4
 
@@ -474,6 +498,25 @@ rm -rf $RPM_BUILD_ROOT
 %{_datadir}/aclocal/libcurl.m4
 
 %changelog
+* Fri Jan 29 2016 Kamil Dudka <kdudka@redhat.com> 7.19.7-52
+- fix a bug in DNS caching code that causes a memory leak (#1302893)
+
+* Fri Jan 15 2016 Kamil Dudka <kdudka@redhat.com> 7.19.7-51
+- SSH: make CURLOPT_SSH_PUBLIC_KEYFILE treat "" as NULL (#1260742)
+
+* Mon Jan 11 2016 Kamil Dudka <kdudka@redhat.com> 7.19.7-50
+- use the default min/max TLS version provided by NSS (#1289205)
+
+* Tue Nov 03 2015 Kamil Dudka <kdudka@redhat.com> 7.19.7-49
+- prevent NSS from incorrectly re-using a session (#1269660)
+- prevent test46 from failing due to expired cookie (#1277551)
+
+* Tue Oct 27 2015 Kamil Dudka <kdudka@redhat.com> 7.19.7-48
+- SSH: do not require public key file for user authentication (#1260742)
+
+* Wed Sep 02 2015 Kamil Dudka <kdudka@redhat.com> 7.19.7-47
+- make SCP/SFTP work with --proxytunnel (#1258566)
+
 * Mon Apr 27 2015 Kamil Dudka <kdudka@redhat.com> 7.19.7-46
 - require credentials to match for NTLM re-use (CVE-2015-3143)
 - close Negotiate connections when done (CVE-2015-3148)

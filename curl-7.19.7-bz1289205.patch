@@ -1,0 +1,43 @@
+From 0bbcfcfaf8ac5bdb4d0bba8552c4e74758c6a275 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Tue, 5 May 2015 18:59:59 +0200
+Subject: [PATCH] nss: use the default min/max TLS version provided by NSS
+
+---
+ lib/nss.c | 13 +++++++------
+ 1 file changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/lib/nss.c b/lib/nss.c
+index 73c4b76..4c84f16 100644
+--- a/lib/nss.c
++++ b/lib/nss.c
+@@ -1176,8 +1176,7 @@ static CURLcode nss_init_sslver(SSLVersionRange *sslver,
+   switch (data->set.ssl.version) {
+   default:
+   case CURL_SSLVERSION_DEFAULT:
+-    sslver->min = SSL_LIBRARY_VERSION_3_0;
+-    return CURLE_OK;
++    break;
+ 
+   case CURL_SSLVERSION_TLSv1:
+ #ifdef SSL_LIBRARY_VERSION_TLS_1_2
+@@ -1325,10 +1324,12 @@ static CURLcode nss_setup_connect(struct connectdata *conn, int sockindex)
+     goto error;
+ 
+   /* enable/disable the requested SSL version(s) */
+-  if(nss_init_sslver(&sslver, data) != CURLE_OK)
+-    goto error;
+-  if(SSL_VersionRangeSet(model, &sslver) != SECSuccess)
+-    goto error;
++  if(data->set.ssl.version != CURL_SSLVERSION_DEFAULT) {
++    if(nss_init_sslver(&sslver, data) != CURLE_OK)
++      goto error;
++    if(SSL_VersionRangeSet(model, &sslver) != SECSuccess)
++      goto error;
++  }
+ 
+   if(data->set.ssl.cipher_list) {
+     if(set_ciphers(data, model, data->set.ssl.cipher_list) != SECSuccess) {
+-- 
+2.5.0
+

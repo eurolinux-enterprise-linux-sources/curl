@@ -1,0 +1,94 @@
+From 7363c0a10a7bff350f989f4d64f2fca988bf66a9 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Thu, 8 Mar 2012 21:47:54 +0100
+Subject: [PATCH 1/2] ssh_connect: tunnel through HTTP proxy if requested
+
+Upstream-commit: cabd010dd46ae4d37d91e20e1127cb00e67ec0a7
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/ssh.c | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/lib/ssh.c b/lib/ssh.c
+index b1d9825..3a6bcea 100644
+--- a/lib/ssh.c
++++ b/lib/ssh.c
+@@ -2439,6 +2439,33 @@ static CURLcode ssh_connect(struct connectdata *conn, bool *done)
+      sessionhandle, deal with it */
+   Curl_reset_reqproto(conn);
+ 
++  if(conn->bits.tunnel_proxy && conn->bits.httpproxy) {
++    /* for SSH over HTTP proxy */
++    struct HTTP http_proxy;
++    struct SSHPROTO *ssh_save;
++
++    /* BLOCKING */
++    /* We want "seamless" SSH operations through HTTP proxy tunnel */
++
++    /* Curl_proxyCONNECT is based on a pointer to a struct HTTP at the member
++     * conn->proto.http; we want SSH through HTTP and we have to change the
++     * member temporarily for connecting to the HTTP proxy. After
++     * Curl_proxyCONNECT we have to set back the member to the original struct
++     * SSH pointer
++     */
++    ssh_save = data->state.proto.ssh;
++    memset(&http_proxy, 0, sizeof(http_proxy));
++    data->state.proto.http = &http_proxy;
++
++    result = Curl_proxyCONNECT(conn, FIRSTSOCKET,
++                               conn->host.name, conn->remote_port);
++
++    data->state.proto.ssh = ssh_save;
++
++    if(CURLE_OK != result)
++      return result;
++  }
++
+   result = ssh_init(conn);
+   if(result)
+     return result;
+-- 
+2.4.6
+
+
+From f1cd9a92d032ea3f57b93c177bb13f19812e5027 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Wed, 2 Sep 2015 17:30:38 +0200
+Subject: [PATCH 2/2] ssh: use correct I/O handlers with --proxytunnel
+
+---
+ lib/ssh.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/lib/ssh.c b/lib/ssh.c
+index 3a6bcea..2ec0429 100644
+--- a/lib/ssh.c
++++ b/lib/ssh.c
+@@ -2443,6 +2443,7 @@ static CURLcode ssh_connect(struct connectdata *conn, bool *done)
+     /* for SSH over HTTP proxy */
+     struct HTTP http_proxy;
+     struct SSHPROTO *ssh_save;
++    long protocol_save;
+ 
+     /* BLOCKING */
+     /* We want "seamless" SSH operations through HTTP proxy tunnel */
+@@ -2457,9 +2458,16 @@ static CURLcode ssh_connect(struct connectdata *conn, bool *done)
+     memset(&http_proxy, 0, sizeof(http_proxy));
+     data->state.proto.http = &http_proxy;
+ 
++    /* force Curl_write() to do HTTP while sending CONNECT to an HTTP proxy */
++    protocol_save = conn->protocol;
++    conn->protocol = PROT_HTTP;
++
+     result = Curl_proxyCONNECT(conn, FIRSTSOCKET,
+                                conn->host.name, conn->remote_port);
+ 
++    /* after sending CONNECT (or failing), completely forget about HTTP */
++    conn->protocol = protocol_save & ~PROT_HTTP;
++
+     data->state.proto.ssh = ssh_save;
+ 
+     if(CURLE_OK != result)
+-- 
+2.4.6
+
