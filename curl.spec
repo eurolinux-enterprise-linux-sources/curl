@@ -1,7 +1,7 @@
 Summary: A utility for getting files from remote servers (FTP, HTTP, and others)
 Name: curl
 Version: 7.29.0
-Release: 54%{?dist}
+Release: 54%{?dist}.1
 License: MIT
 Group: Applications/Internet
 Source: http://curl.haxx.se/download/%{name}-%{version}.tar.lzma
@@ -214,6 +214,9 @@ Patch68:  0068-curl-7.29.0-CVE-2018-14618.patch
 # prevent curl --rate-limit from hanging on file URLs (#1281969)
 Patch69:  0069-curl-7.29.0-file-limit-rate.patch
 
+# fix auth failure with duplicated WWW-Authenticate header (#1754736)
+Patch72:  0072-curl-7.29.0-dup-auth-header.patch
+
 # patch making libcurl multilib ready
 Patch101: 0101-curl-7.29.0-multilib.patch
 
@@ -413,6 +416,7 @@ documentation of the library, too.
 %patch67 -p1
 %patch68 -p1
 %patch69 -p1
+%patch72 -p1
 
 # regenerate Makefile.in files
 aclocal -I m4
@@ -528,6 +532,9 @@ rm -rf $RPM_BUILD_ROOT
 %{_datadir}/aclocal/libcurl.m4
 
 %changelog
+* Mon Oct 07 2019 Kamil Dudka <kdudka@redhat.com> - 7.29.0-54.el7_7.1
+- fix auth failure with duplicated WWW-Authenticate header (#1754736)
+
 * Mon Jun 03 2019 Kamil Dudka <kdudka@redhat.com> - 7.29.0-54
 - make `curl --tlsv1` backward compatible (#1672639)
 

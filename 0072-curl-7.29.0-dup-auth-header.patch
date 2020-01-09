@@ -1,0 +1,32 @@
+From d0aa55d27584b37b350721422849b510845a25bf Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Mon, 5 May 2014 14:49:30 +0200
+Subject: [PATCH] http: avoid auth failure on a duplicated header
+
+... 'WWW-Authenticate: Negotiate' received from server
+
+Reported by: David Woodhouse
+Bug: https://bugzilla.redhat.com/1093348
+
+Upstream-commit: ec5fde24de5ddd1910730f0cbac5e77820b26eb9
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/http.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/http.c b/lib/http.c
+index a6be452..46734c4 100644
+--- a/lib/http.c
++++ b/lib/http.c
+@@ -750,7 +750,7 @@ CURLcode Curl_http_input_auth(struct connectdata *conn,
+           infof(data, "Authentication problem. Ignoring this.\n");
+           data->state.authproblem = TRUE;
+         }
+-        else {
++        else if(data->state.negotiate.state == GSS_AUTHNONE) {
+           neg = Curl_input_negotiate(conn, (bool)(httpcode == 407), start);
+           if(neg == 0) {
+             DEBUGASSERT(!data->req.newurl);
+-- 
+2.20.1
+
