@@ -1,7 +1,7 @@
 Summary: A utility for getting files from remote servers (FTP, HTTP, and others)
 Name: curl
 Version: 7.29.0
-Release: 46%{?dist}
+Release: 51%{?dist}
 License: MIT
 Group: Applications/Internet
 Source: http://curl.haxx.se/download/%{name}-%{version}.tar.lzma
@@ -175,6 +175,33 @@ Patch55:  0055-curl-7.29.0-CVE-2017-1000257.patch
 # reset authentication state when HTTP transfer is done (#1511523)
 Patch56:  0056-curl-7.29.0-0afbcfd8.patch
 
+# make NSS deallocate PKCS #11 objects early enough (#1510247)
+Patch57:  0057-curl-7.29.0-nss-obj-leak.patch
+
+# update certificates in the test-suite because they expire soon (#1572723)
+Patch58:  0058-curl-7.29.0-test-certs.patch
+
+# doc: --tlsauthtype works only if built with TLS-SRP support (#1542256)
+Patch59:  0059-curl-7.29.0-tlsauthtype-doc.patch
+
+# http: prevent custom Authorization headers in redirects (CVE-2018-1000007)
+Patch60:  0060-curl-7.29.0-CVE-2018-1000007.patch
+
+# fix RTSP RTP buffer over-read (CVE-2018-1000122)
+Patch61:  0061-curl-7.29.0-CVE-2018-1000122.patch
+
+# fix LDAP NULL pointer dereference (CVE-2018-1000121)
+Patch62:  0062-curl-7.29.0-CVE-2018-1000121.patch
+
+# fix FTP path trickery leads to NIL byte out of bounds write (CVE-2018-1000120)
+Patch63:  0063-curl-7.29.0-CVE-2018-1000120.patch
+
+# fix RTSP bad headers buffer over-read (CVE-2018-1000301)
+Patch64:  0064-curl-7.29.0-CVE-2018-1000301.patch
+
+# make curl --speed-limit work with TFTP (#1584750)
+Patch65:  0065-curl-7.29.0-tftp-speed-limit.patch
+
 # patch making libcurl multilib ready
 Patch101: 0101-curl-7.29.0-multilib.patch
 
@@ -254,6 +281,9 @@ resume, proxy tunneling and a busload of other useful tricks.
 Summary: A library for getting files from web servers
 Group: Development/Libraries
 Requires: libssh2%{?_isa} >= %{libssh2_version}
+
+# require a new enough version of nss-pem to avoid regression in yum (#1610998)
+Requires: nss-pem%{?_isa} >= 1.0.3-5
 
 %description -n libcurl
 libcurl is a free and easy-to-use client-side URL transfer library, supporting
@@ -358,6 +388,15 @@ documentation of the library, too.
 %patch54 -p1
 %patch55 -p1
 %patch56 -p1
+%patch57 -p1
+%patch58 -p1
+%patch59 -p1
+%patch60 -p1
+%patch61 -p1
+%patch62 -p1
+%patch63 -p1
+%patch64 -p1
+%patch65 -p1
 
 # regenerate Makefile.in files
 aclocal -I m4
@@ -473,6 +512,28 @@ rm -rf $RPM_BUILD_ROOT
 %{_datadir}/aclocal/libcurl.m4
 
 %changelog
+* Wed Aug 08 2018 Kamil Dudka <kdudka@redhat.com> - 7.29.0-51
+- require a new enough version of nss-pem to avoid regression in yum (#1610998)
+
+* Thu Jun 07 2018 Kamil Dudka <kdudka@redhat.com> - 7.29.0-50
+- remove dead code, detected by Coverity Analysis
+- remove unused variable, detected by GCC and Clang
+
+* Wed Jun 06 2018 Kamil Dudka <kdudka@redhat.com> - 7.29.0-49
+- make curl --speed-limit work with TFTP (#1584750)
+
+* Wed May 30 2018 Kamil Dudka <kdudka@redhat.com> - 7.29.0-48
+- fix RTSP bad headers buffer over-read (CVE-2018-1000301)
+- fix FTP path trickery leads to NIL byte out of bounds write (CVE-2018-1000120)
+- fix LDAP NULL pointer dereference (CVE-2018-1000121)
+- fix RTSP RTP buffer over-read (CVE-2018-1000122)
+- http: prevent custom Authorization headers in redirects (CVE-2018-1000007)
+- doc: --tlsauthtype works only if built with TLS-SRP support (#1542256)
+- update certificates in the test-suite because they expire soon (#1572723)
+
+* Fri Mar 02 2018 Kamil Dudka <kdudka@redhat.com> - 7.29.0-47
+- make NSS deallocate PKCS #11 objects early enough (#1510247)
+
 * Mon Dec 11 2017 Kamil Dudka <kdudka@redhat.com> - 7.29.0-46
 - reset authentication state when HTTP transfer is done (#1511523)
 

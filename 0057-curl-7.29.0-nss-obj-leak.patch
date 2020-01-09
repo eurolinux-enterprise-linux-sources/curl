@@ -1,0 +1,102 @@
+From 543ba995e5beb83a754a8f844491446747c83572 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Thu, 8 Feb 2018 11:23:49 +0100
+Subject: [PATCH] nss: use PK11_CreateManagedGenericObject() if available
+
+... so that the memory allocated by applications using libcurl does not
+grow per each TLS connection.
+
+Bug: https://bugzilla.redhat.com/1510247
+
+Closes #2297
+
+Upstream-commit: 1605d93a7b8ac4b7f348e304e018e9d15ffaabf0
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ configure            | 10 ++++++++++
+ configure.ac         |  9 +++++++++
+ lib/curl_config.h.in |  3 +++
+ lib/nss.c            | 12 +++++++++++-
+ 4 files changed, 33 insertions(+), 1 deletion(-)
+
+diff --git a/configure b/configure
+index fc260ee..3c77748 100755
+--- a/configure
++++ b/configure
+@@ -23753,6 +23753,16 @@ $as_echo "$as_me: detected NSS version $version" >&6;}
+                 NSS_LIBS=$addlib
+ 
+ 
++                                ac_fn_c_check_func "$LINENO" "PK11_CreateManagedGenericObject" "ac_cv_func_PK11_CreateManagedGenericObject"
++if test "x$ac_cv_func_PK11_CreateManagedGenericObject" = xyes; then :
++
++
++$as_echo "#define HAVE_PK11_CREATEMANAGEDGENERICOBJECT 1" >>confdefs.h
++
++
++fi
++
++
+                                         if test "x$cross_compiling" != "xyes"; then
+           LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$nssprefix/lib$libsuff"
+           export LD_LIBRARY_PATH
+diff --git a/configure.ac b/configure.ac
+index 9612c2f..887ded9 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -2216,6 +2216,15 @@ if test "$curl_ssl_msg" = "$init_ssl_msg"; then
+         NSS_LIBS=$addlib
+         AC_SUBST([NSS_LIBS])
+ 
++        dnl PK11_CreateManagedGenericObject() was introduced in NSS 3.34 because
++        dnl PK11_DestroyGenericObject() does not release resources allocated by
++        dnl PK11_CreateGenericObject() early enough.
++        AC_CHECK_FUNC(PK11_CreateManagedGenericObject,
++          [
++            AC_DEFINE(HAVE_PK11_CREATEMANAGEDGENERICOBJECT, 1,
++                      [if you have the PK11_CreateManagedGenericObject function])
++          ])
++
+         dnl when shared libs were found in a path that the run-time
+         dnl linker doesn't search through, we need to add it to
+         dnl LD_LIBRARY_PATH to prevent further configure tests to fail
+diff --git a/lib/curl_config.h.in b/lib/curl_config.h.in
+index 19b66fa..9db354b 100644
+--- a/lib/curl_config.h.in
++++ b/lib/curl_config.h.in
+@@ -503,6 +503,9 @@
+ /* Define to 1 if you have the `pipe' function. */
+ #undef HAVE_PIPE
+ 
++/* if you have the PK11_CreateManagedGenericObject function */
++#undef HAVE_PK11_CREATEMANAGEDGENERICOBJECT
++
+ /* Define to 1 if you have a working poll function. */
+ #undef HAVE_POLL
+ 
+diff --git a/lib/nss.c b/lib/nss.c
+index 1b8abd3..31e5d75 100644
+--- a/lib/nss.c
++++ b/lib/nss.c
+@@ -399,7 +399,17 @@ static CURLcode nss_create_object(struct ssl_connect_data *ssl,
+     PK11_SETATTRS(attrs, attr_cnt, CKA_TRUST, pval, sizeof(*pval));
+   }
+ 
+-  obj = PK11_CreateGenericObject(slot, attrs, attr_cnt, PR_FALSE);
++  /* PK11_CreateManagedGenericObject() was introduced in NSS 3.34 because
++   * PK11_DestroyGenericObject() does not release resources allocated by
++   * PK11_CreateGenericObject() early enough.  */
++  obj =
++#ifdef HAVE_PK11_CREATEMANAGEDGENERICOBJECT
++    PK11_CreateManagedGenericObject
++#else
++    PK11_CreateGenericObject
++#endif
++    (slot, attrs, attr_cnt, PR_FALSE);
++
+   PK11_FreeSlot(slot);
+   if(!obj)
+     return err;
+-- 
+2.13.6
+

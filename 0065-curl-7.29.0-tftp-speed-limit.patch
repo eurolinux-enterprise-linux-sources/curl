@@ -1,0 +1,275 @@
+From 71e1317a4b44d9d81ec99c46038ada32c0e51bc9 Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Thu, 22 Aug 2013 19:23:08 +0200
+Subject: [PATCH 1/2] tftpd: support "writedelay" within <servercmd>
+
+Upstream-commit: 06d1b10cbefaa7c54c73e09df746ae79b7f14e14
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ tests/FILEFORMAT     |  4 +++
+ tests/server/tftpd.c | 83 ++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 84 insertions(+), 3 deletions(-)
+
+diff --git a/tests/FILEFORMAT b/tests/FILEFORMAT
+index 702368f..4759668 100644
+--- a/tests/FILEFORMAT
++++ b/tests/FILEFORMAT
+@@ -137,6 +137,10 @@ rtp: part [num] channel [num] size [num]
+ connection-monitor When used, this will log [DISCONNECT] to the server.input
+                log when the connection is disconnected.
+ 
++
++For TFTP:
++writedelay: [secs] delay this amount between reply packets (each packet being
++                   512 bytes payload)
+ </servercmd>
+ </reply>
+ 
+diff --git a/tests/server/tftpd.c b/tests/server/tftpd.c
+index 48950c5..e2ec628 100644
+--- a/tests/server/tftpd.c
++++ b/tests/server/tftpd.c
+@@ -107,8 +107,10 @@ struct testcase {
+   size_t bufsize; /* size of the data in buffer */
+   char *rptr;     /* read pointer into the buffer */
+   size_t rcount;  /* amount of data left to read of the file */
+-  long num;       /* test case number */
++  long testno;    /* test case number */
+   int ofile;      /* file descriptor for output file when uploading to us */
++
++  int writedelay; /* number of seconds between each packet */
+ };
+ 
+ struct formats {
+@@ -579,7 +581,7 @@ static ssize_t write_behind(struct testcase *test, int convert)
+ 
+   if(!test->ofile) {
+     char outfile[256];
+-    snprintf(outfile, sizeof(outfile), "log/upload.%ld", test->num);
++    snprintf(outfile, sizeof(outfile), "log/upload.%ld", test->testno);
+     test->ofile=open(outfile, O_CREAT|O_RDWR, 0777);
+     if(test->ofile == -1) {
+       logmsg("Couldn't create and/or open file %s for upload!", outfile);
+@@ -1026,6 +1028,73 @@ again:
+   return 0;
+ }
+ 
++/* Based on the testno, parse the correct server commands. */
++static int parse_servercmd(struct testcase *req)
++{
++  FILE *stream;
++  char *filename;
++  int error;
++
++  filename = test2file(req->testno);
++
++  stream=fopen(filename, "rb");
++  if(!stream) {
++    error = errno;
++    logmsg("fopen() failed with error: %d %s", error, strerror(error));
++    logmsg("  [1] Error opening file: %s", filename);
++    logmsg("  Couldn't open test file %ld", req->testno);
++    return 1; /* done */
++  }
++  else {
++    char *orgcmd = NULL;
++    char *cmd = NULL;
++    size_t cmdsize = 0;
++    int num=0;
++
++    /* get the custom server control "commands" */
++    error = getpart(&orgcmd, &cmdsize, "reply", "servercmd", stream);
++    fclose(stream);
++    if(error) {
++      logmsg("getpart() failed with error: %d", error);
++      return 1; /* done */
++    }
++
++    cmd = orgcmd;
++    while(cmd && cmdsize) {
++      char *check;
++      if(1 == sscanf(cmd, "writedelay: %d", &num)) {
++        logmsg("instructed to delay %d secs between packets", num);
++        req->writedelay = num;
++      }
++      else {
++        logmsg("Unknown <servercmd> instruction found: %s", cmd);
++      }
++      /* try to deal with CRLF or just LF */
++      check = strchr(cmd, '\r');
++      if(!check)
++        check = strchr(cmd, '\n');
++
++      if(check) {
++        /* get to the letter following the newline */
++        while((*check == '\r') || (*check == '\n'))
++          check++;
++
++        if(!*check)
++          /* if we reached a zero, get out */
++          break;
++        cmd = check;
++      }
++      else
++        break;
++    }
++    if(orgcmd)
++      free(orgcmd);
++  }
++
++  return 0; /* OK! */
++}
++
++
+ /*
+  * Validate file access.
+  */
+@@ -1076,7 +1145,9 @@ static int validate_access(struct testcase *test,
+ 
+     logmsg("requested test number %ld part %ld", testno, partno);
+ 
+-    test->num = testno;
++    test->testno = testno;
++
++    (void)parse_servercmd(test);
+ 
+     file = test2file(testno);
+ 
+@@ -1147,6 +1218,12 @@ static void sendtftp(struct testcase *test, struct formats *pf)
+ #ifdef HAVE_SIGSETJMP
+     (void) sigsetjmp(timeoutbuf, 1);
+ #endif
++    if(test->writedelay) {
++      logmsg("Pausing %d seconds before %d bytes", test->writedelay,
++             size);
++      wait_ms(1000*test->writedelay);
++    }
++
+     send_data:
+     if (swrite(peer, sdp, size + 4) != size + 4) {
+       logmsg("write");
+-- 
+2.14.4
+
+
+From fd692a86883109c1ab5b57b9b9ab19ae0ab15a1f Mon Sep 17 00:00:00 2001
+From: Daniel Stenberg <daniel@haxx.se>
+Date: Thu, 22 Aug 2013 22:40:38 +0200
+Subject: [PATCH 2/2] TFTP: make the CURLOPT_LOW_SPEED* options work
+
+... this also makes sure that the progess callback gets called more
+often during TFTP transfers.
+
+Added test 1238 to verify.
+
+Bug: http://curl.haxx.se/bug/view.cgi?id=1269
+Reported-by: Jo3
+
+Upstream-commit: 4bea91fc677359f3dcedb05a431258b6cd5d98f3
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ lib/tftp.c             | 10 ++++++++++
+ tests/data/Makefile.am |  2 +-
+ tests/data/test1238    | 49 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 60 insertions(+), 1 deletion(-)
+ create mode 100644 tests/data/test1238
+
+diff --git a/lib/tftp.c b/lib/tftp.c
+index ef740b8..79b4f41 100644
+--- a/lib/tftp.c
++++ b/lib/tftp.c
+@@ -56,6 +56,7 @@
+ #include "multiif.h"
+ #include "url.h"
+ #include "rawstr.h"
++#include "speedcheck.h"
+ 
+ #define _MPRINTF_REPLACE /* use our functions only */
+ #include <curl/mprintf.h>
+@@ -1259,6 +1260,15 @@ static CURLcode tftp_doing(struct connectdata *conn, bool *dophase_done)
+   if(*dophase_done) {
+     DEBUGF(infof(conn->data, "DO phase is complete\n"));
+   }
++  else {
++    /* The multi code doesn't have this logic for the DOING state so we
++       provide it for TFTP since it may do the entire transfer in this
++       state. */
++    if(Curl_pgrsUpdate(conn))
++      result = CURLE_ABORTED_BY_CALLBACK;
++    else
++      result = Curl_speedcheck(conn->data, Curl_tvnow());
++  }
+   return result;
+ }
+ 
+diff --git a/tests/data/Makefile.am b/tests/data/Makefile.am
+index 677564b..9d9b9ea 100644
+--- a/tests/data/Makefile.am
++++ b/tests/data/Makefile.am
+@@ -81,7 +81,7 @@ test1118 test1119 test1120 test1121 test1122 test1123 test1124 test1125	\
+ test1126 test1127 test1128 test1129 test1130 test1131 test1132 test1133 \
+ test1200 test1201 test1202 test1203 test1204 test1205 test1206 test1207 \
+ test1208 test1209 test1210 test1211 test1213 test1214 test1216 test1218 \
+-test1220 test1221 test1222 test1223 test1233 test1236 \
++test1220 test1221 test1222 test1223 test1233 test1236 test1238 \
+ test1300 test1301 test1302 test1303 test1304 test1305	\
+ test1306 test1307 test1308 test1309 test1310 test1311 test1312 test1313 \
+ test1314 test1315 test1316 test1317 test1318 test1319 test1320 test1321 \
+diff --git a/tests/data/test1238 b/tests/data/test1238
+new file mode 100644
+index 0000000..1859339
+--- /dev/null
++++ b/tests/data/test1238
+@@ -0,0 +1,49 @@
++<testcase>
++<info>
++<keywords>
++TFTP
++TFTP RRQ
++</keywords>
++</info>
++
++#
++# Server-side
++<reply>
++<servercmd>
++writedelay: 2
++</servercmd>
++# ~1200 bytes (so that they don't fit in two 512 byte chunks)
++<data nocheck="yes">
++012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789
++</data>
++</reply>
++
++#
++# Client-side
++<client>
++<server>
++tftp
++</server>
++ <name>
++slow TFTP retrieve cancel due to -Y and -y
++ </name>
++# if less than 1000 bytes/sec within 2 seconds, abort!
++ <command>
++tftp://%HOSTIP:%TFTPPORT//1238 -Y1000 -y2
++</command>
++</client>
++
++#
++# Verify pseudo protocol after the test has been "shot"
++<verify>
++<protocol>
++opcode: 1
++filename: /1238
++mode: octet
++</protocol>
++# 28 = CURLE_OPERATION_TIMEDOUT
++<errorcode>
++28
++</errorcode>
++</verify>
++</testcase>
+-- 
+2.14.4
+

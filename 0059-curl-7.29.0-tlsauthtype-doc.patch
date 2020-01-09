@@ -1,0 +1,32 @@
+From 3ba5c596cb6610c883335a07c0e04335b8372563 Mon Sep 17 00:00:00 2001
+From: Kamil Dudka <kdudka@redhat.com>
+Date: Mon, 12 Feb 2018 13:31:59 +0100
+Subject: [PATCH] tlsauthtype.d: works only if libcurl is built with TLS-SRP
+ support
+
+Bug: https://bugzilla.redhat.com/1542256
+
+Closes #2306
+
+Upstream-commit: 08029a7e73f8768b1b4e37876b34c6ff6ef32ece
+Signed-off-by: Kamil Dudka <kdudka@redhat.com>
+---
+ docs/curl.1 | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/docs/curl.1 b/docs/curl.1
+index 7906f1f..a26b03c 100644
+--- a/docs/curl.1
++++ b/docs/curl.1
+@@ -1446,6 +1446,8 @@ If this option is used several times, the last one will be used.
+ Set TLS authentication type. Currently, the only supported option is "SRP",
+ for TLS-SRP (RFC 5054). If \fI--tlsuser\fP and \fI--tlspassword\fP are
+ specified but \fI--tlsauthtype\fP is not, then this option defaults to "SRP".
++This option works only if the underlying libcurl is built with TLS-SRP support,
++which requires OpenSSL or GnuTLS with TLS-SRP support.
+ (Added in 7.21.4)
+ .IP "--tlspassword <password>"
+ Set password for use with the TLS authentication method specified with
+-- 
+2.14.3
+
